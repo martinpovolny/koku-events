@@ -89,6 +89,11 @@ Receipt claims, raw-event persistence, inventory updates, and event-driven
 metering commit in one transaction. The endpoint does not use Kafka, the
 watcher, or the reconciler.
 
+The adapter accepts both lifecycle events and `osac.resource.heartbeat.v1`
+events. Heartbeat payloads carry their metering duration and may omit
+`transition_time`; they use the same batch endpoint and are persisted and
+processed by the downstream cost pipeline.
+
 A batch-only process should disable the retained OSAC components and leave
 Kafka unset:
 

@@ -584,6 +584,11 @@ spec:
                   key: connection-url
             - name: INGEST_LISTEN_ADDR
               value: ":8020"
+            # The OSAC adapter is the event source for this deployment. Keep
+            # the retained Watch/reconciliation path disabled to avoid a
+            # second ingestion path and duplicate processing.
+            - name: DISABLE_COMPONENTS
+              value: "watcher,reconciler"
             - name: LOG_FORMAT
               value: "json"
             - name: LOG_LEVEL
@@ -1039,11 +1044,22 @@ kubectl get pods --all-namespaces | grep -E "NAMESPACE|osac|postgres|cert-manage
 # Check OSAC services
 kubectl get svc -n osac
 
-# Check consumer logs — should show reconciliation, not 401 loops
+# Check consumer logs — should show batch requests, not 401 loops
 kubectl logs -n cost-mgmt -l app=cost-event-consumer --tail=20
+
+# Confirm the batch receiver is live
+kubectl port-forward -n cost-mgmt svc/cost-event-consumer 8020:8020 &
+curl -fsS http://localhost:8020/readyz
+
+# After the OSAC adapter sends events, inspect the durable pipeline
+curl -fsS http://localhost:8020/api/v1/reports/summary | jq
 ```
 
-Expected: all pods `Running`, consumer logs showing `reconciliation complete` with no `token is not valid` errors.
+Expected: all pods `Running`, the consumer ready, and the reports summary
+showing increasing `raw_events`, `metering_entries`, and `cost_entries` after
+the OSAC request generator runs. The adapter sends lifecycle and heartbeat
+CloudEvents to `POST /api/v1/events/batch`; the receiver responds with HTTP
+204 for an accepted batch.
 
 ## Cleanup
 
