@@ -1,32 +1,104 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test binary, built with `go test -c`
-*.test
-
-# Code coverage profiles and other test artifacts
-*.out
-coverage.*
-*.coverprofile
-profile.cov
-
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
-go.work
-go.work.sum
-
-# env file
+# Environment & secrets
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+*.so
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# uv
+.uv/
+uv.lock
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+.pyright/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+logs/
+
+# Docker
+docker-compose.override.yml
+
+# Generated tokens / local scripts
+/tmp/
+*.token
+*.txt.local
+
+# Alembic
+# (keep migrations tracked, but ignore local override files)
+alembic.ini.local
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Binaries
+inventory-watcher/inventory-watcher
+inventory-watcher/consumer
+inventory-watcher/maas-simulator
+*.exe
+*.test
+*.prof
+
+# Tokens / secrets
+/tmp/osac_token.txt
+server.key
+server.crt
+docs/.markdown-viewer-temp.html
+*.markdown-viewer-temp.html
+deploy/k3d-ipp-dump-*
+inventory-watcher/cost-event-consumer
+inventory-watcher/koku-sync
+istio-*/
+.claude/
+.playwright-mcp/

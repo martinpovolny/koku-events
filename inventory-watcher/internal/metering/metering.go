@@ -1,0 +1,516 @@
+package metering
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"time"
+
+	"github.com/osac-project/cost-event-consumer/internal/inventory"
+	"github.com/osac-project/cost-event-consumer/internal/metrics"
+)
+
+// Meter runs a periodic sweep of all billable resources and produces
+// metering entries based on elapsed time since last metering.
+//
+// Design decision: we sweep every 60 seconds to match the metering
+// collector's emission interval defined in the OSAC CloudEvents spec
+// (event-types.md). This means metering entries have ~60s granularity,
+// which is sufficient for the 60-second processing SLA in the requirements.
+// The Watch stream gives us state transitions, not periodic heartbeats,
+// so we need this sweep to produce time-based metering entries.
+type Meter struct {
+	store    *inventory.Store
+	interval time.Duration
+	logger   *slog.Logger
+}
+
+func New(store *inventory.Store, interval time.Duration, logger *slog.Logger) *Meter {
+	return &Meter{store: store, interval: interval, logger: logger}
+}
+
+// WithStore returns a Meter that shares configuration and logging with m but
+// directs event-driven writes through store. Batch ingestion uses it with a
+// transaction-bound Store so MaaS entries commit with the receipt and raw
+// event rather than becoming an independent side effect.
+func (m *Meter) WithStore(store *inventory.Store) *Meter {
+	clone := *m
+	clone.store = store
+	return &clone
+}
+
+func (m *Meter) Run(ctx context.Context) error {
+	ticker := time.NewTicker(m.interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			m.sweep(ctx)
+		}
+	}
+}
+
+func (m *Meter) resolveProject(ctx context.Context, project, tenantID string) string {
+	if project != "" {
+		return project
+	}
+	return m.store.DefaultProjectForTenant(ctx, tenantID)
+}
+
+func (m *Meter) sweep(ctx context.Context) {
+	start := time.Now()
+	now := start.UTC()
+
+	m.meterComputeInstances(ctx, now)
+	m.meterClusters(ctx, now)
+	m.meterBareMetalInstances(ctx, now)
+
+	// Update DB sizing metrics.
+	sizing := m.store.GetSizingStats(ctx)
+	for table, rows := range sizing.TableRows {
+		metrics.DBTableRows.WithLabelValues(table).Set(float64(rows))
+	}
+	for table, bytes := range sizing.TableBytes {
+		metrics.DBTableBytes.WithLabelValues(table).Set(float64(bytes))
+	}
+	metrics.UnratedMeteringEntries.Set(float64(sizing.UnratedEntries))
+	metrics.PipelineLagSeconds.Set(sizing.PipelineLagSeconds)
+
+	metrics.MeteringSweepDuration.Observe(time.Since(start).Seconds())
+}
+
+func (m *Meter) meterComputeInstances(ctx context.Context, now time.Time) {
+	instances, err := m.store.BillableComputeInstances(ctx)
+	if err != nil {
+		m.logger.Error("failed to list billable compute instances", "error", err)
+		metrics.MeteringSweepErrors.Inc()
+		return
+	}
+
+	instanceTypes := m.loadInstanceTypeMap(ctx)
+
+	metered := 0
+	for _, inst := range instances {
+		periodStart := inst.CreatedAt
+		if inst.LastMeteredAt != nil {
+			periodStart = *inst.LastMeteredAt
+		}
+
+		durationSeconds := now.Sub(periodStart).Seconds()
+		if durationSeconds <= 0 {
+			continue
+		}
+
+		projectID := m.resolveProject(ctx, inst.Project, inst.Tenant)
+		entries := computeInstanceMeters(inst, instanceTypes, projectID, durationSeconds, periodStart, now)
+		if err := m.store.InsertMeteringEntryBatch(ctx, entries); err != nil {
+			m.logger.Error("failed to insert metering entries",
+				"resource", inst.InstanceID, "error", err)
+		} else {
+			for _, entry := range entries {
+				metrics.MeteringEntriesCreated.WithLabelValues(entry.ResourceType, entry.MeterName).Inc()
+			}
+		}
+
+		if err := m.store.UpdateComputeInstanceLastMetered(ctx, inst.InstanceID, now); err != nil {
+			m.logger.Error("failed to update last_metered_at",
+				"resource", inst.InstanceID, "error", err)
+		}
+		metered++
+	}
+
+	if metered > 0 {
+		m.logger.Info("metering sweep complete", "compute_instances", metered)
+	}
+}
+
+// MeterComputeInstanceFinal produces final metering entries for a
+// compute instance that is being deleted. Called by the watcher on
+// DELETE events to capture usage up to the deletion timestamp.
+func (m *Meter) MeterComputeInstanceFinal(ctx context.Context, instanceID string, deletedAt time.Time) {
+	inst, err := m.store.GetComputeInstance(ctx, instanceID)
+	if err != nil {
+		m.logger.Debug("no inventory record for final metering", "id", instanceID)
+		return
+	}
+
+	if !IsComputeInstanceBillable(inst.State) {
+		return
+	}
+
+	periodStart := inst.CreatedAt
+	if inst.LastMeteredAt != nil {
+		periodStart = *inst.LastMeteredAt
+	}
+
+	durationSeconds := deletedAt.Sub(periodStart).Seconds()
+	if durationSeconds <= 0 {
+		return
+	}
+
+	projectID := m.resolveProject(ctx, inst.Project, inst.Tenant)
+	instanceTypes := m.loadInstanceTypeMap(ctx)
+	entries := computeInstanceMeters(*inst, instanceTypes, projectID, durationSeconds, periodStart, deletedAt)
+	if err := m.store.InsertMeteringEntryBatch(ctx, entries); err != nil {
+		m.logger.Error("failed to insert final metering entries",
+			"resource", instanceID, "error", err)
+	}
+
+	m.logger.Debug("final metering for deleted instance", "id", instanceID, "duration_seconds", durationSeconds)
+}
+
+func (m *Meter) loadInstanceTypeMap(ctx context.Context) map[string]*inventory.InstanceTypeRecord {
+	all, err := m.store.ListAllInstanceTypes(ctx)
+	if err != nil {
+		m.logger.Error("failed to load instance types for catalog fallback", "error", err)
+		return nil
+	}
+	itMap := make(map[string]*inventory.InstanceTypeRecord, len(all))
+	for i := range all {
+		itMap[all[i].InstanceTypeID] = &all[i]
+	}
+	return itMap
+}
+
+func (m *Meter) meterClusters(ctx context.Context, now time.Time) {
+	clusters, err := m.store.BillableClusters(ctx)
+	if err != nil {
+		m.logger.Error("failed to list billable clusters", "error", err)
+		metrics.MeteringSweepErrors.Inc()
+		return
+	}
+
+	metered := 0
+	for _, cl := range clusters {
+		periodStart := cl.CreatedAt
+		if cl.LastMeteredAt != nil {
+			periodStart = *cl.LastMeteredAt
+		}
+
+		durationSeconds := now.Sub(periodStart).Seconds()
+		if durationSeconds <= 0 {
+			continue
+		}
+
+		projectID := m.resolveProject(ctx, "", cl.Tenant)
+		entries := clusterMeters(cl, projectID, durationSeconds, periodStart, now)
+		if err := m.store.InsertMeteringEntryBatch(ctx, entries); err != nil {
+			m.logger.Error("failed to insert cluster metering entries",
+				"resource", cl.ClusterID, "error", err)
+		} else {
+			for _, entry := range entries {
+				metrics.MeteringEntriesCreated.WithLabelValues(entry.ResourceType, entry.MeterName).Inc()
+			}
+		}
+
+		if err := m.store.UpdateClusterLastMetered(ctx, cl.ClusterID, now); err != nil {
+			m.logger.Error("failed to update cluster last_metered_at",
+				"resource", cl.ClusterID, "error", err)
+		}
+		metered++
+	}
+
+	if metered > 0 {
+		m.logger.Info("metering sweep complete", "clusters", metered)
+	}
+}
+
+func clusterMeters(cl inventory.ClusterRecord, projectID string, durationSeconds float64, periodStart, periodEnd time.Time) []inventory.MeteringEntry {
+	entries := []inventory.MeteringEntry{
+		{
+			ResourceType: "cluster",
+			ResourceID:   cl.ClusterID,
+			TenantID:     cl.Tenant,
+			ProjectID:    projectID,
+			MeterName:    "cluster_uptime_seconds",
+			Value:        durationSeconds,
+			Unit:         "seconds",
+			PeriodStart:  periodStart,
+			PeriodEnd:    periodEnd,
+		},
+	}
+
+	var nodeSets map[string]struct {
+		HostType string `json:"host_type"`
+		Size     int32  `json:"size"`
+	}
+	if cl.NodeSetsJSON != nil {
+		if err := json.Unmarshal(cl.NodeSetsJSON, &nodeSets); err != nil {
+			slog.Warn("failed to parse cluster node_sets JSON", "cluster", cl.ClusterID, "error", err)
+		}
+	}
+
+	totalWorkerNodes := 0
+	totalWorkerNodeSeconds := 0.0
+	for _, ns := range nodeSets {
+		totalWorkerNodes += int(ns.Size)
+		totalWorkerNodeSeconds += float64(ns.Size) * durationSeconds
+	}
+
+	if totalWorkerNodeSeconds > 0 {
+		entries = append(entries, inventory.MeteringEntry{
+			ResourceType: "cluster",
+			ResourceID:   cl.ClusterID,
+			TenantID:     cl.Tenant,
+			ProjectID:    projectID,
+			MeterName:    "cluster_worker_node_seconds",
+			Value:        totalWorkerNodeSeconds,
+			Unit:         "node_seconds",
+			PeriodStart:  periodStart,
+			PeriodEnd:    periodEnd,
+		})
+	}
+
+	if totalWorkerNodes > 0 {
+		entries = append(entries, inventory.MeteringEntry{
+			ResourceType: "cluster",
+			ResourceID:   cl.ClusterID,
+			TenantID:     cl.Tenant,
+			ProjectID:    projectID,
+			MeterName:    "cluster_worker_node_count",
+			Value:        float64(totalWorkerNodes),
+			Unit:         "nodes",
+			PeriodStart:  periodStart,
+			PeriodEnd:    periodEnd,
+		})
+	}
+
+	return entries
+}
+
+func (m *Meter) meterBareMetalInstances(ctx context.Context, now time.Time) {
+	instances, err := m.store.BillableBareMetalInstances(ctx)
+	if err != nil {
+		m.logger.Error("failed to list billable bare metal instances", "error", err)
+		metrics.MeteringSweepErrors.Inc()
+		return
+	}
+
+	metered := 0
+	for _, inst := range instances {
+		periodStart := inst.CreatedAt
+		if inst.LastMeteredAt != nil {
+			periodStart = *inst.LastMeteredAt
+		}
+
+		durationSeconds := now.Sub(periodStart).Seconds()
+		if durationSeconds <= 0 {
+			continue
+		}
+
+		projectID := m.resolveProject(ctx, "", inst.Tenant)
+		entries := []inventory.MeteringEntry{
+			{ResourceType: "bare_metal", ResourceID: inst.InstanceID, TenantID: inst.Tenant, ProjectID: projectID, MeterName: "bm_uptime_seconds", Value: durationSeconds, Unit: "seconds", PeriodStart: periodStart, PeriodEnd: now},
+		}
+
+		if err := m.store.InsertMeteringEntryBatch(ctx, entries); err != nil {
+			m.logger.Error("failed to insert BM metering entries", "resource", inst.InstanceID, "error", err)
+		} else {
+			for _, entry := range entries {
+				metrics.MeteringEntriesCreated.WithLabelValues(entry.ResourceType, entry.MeterName).Inc()
+			}
+		}
+
+		if err := m.store.UpdateBareMetalInstanceLastMetered(ctx, inst.InstanceID, now); err != nil {
+			m.logger.Error("failed to update BM last_metered_at", "resource", inst.InstanceID, "error", err)
+		}
+		metered++
+	}
+
+	if metered > 0 {
+		m.logger.Info("metering sweep complete", "bare_metal_instances", metered)
+	}
+}
+
+// MeterBareMetalInstanceFinal produces final metering entries for a
+// bare metal instance that is being deleted.
+func (m *Meter) MeterBareMetalInstanceFinal(ctx context.Context, instanceID string, deletedAt time.Time) {
+	inst, err := m.store.GetBareMetalInstance(ctx, instanceID)
+	if err != nil {
+		m.logger.Debug("no inventory record for final BM metering", "id", instanceID)
+		return
+	}
+
+	if !IsBareMetalBillable(inst.State) {
+		return
+	}
+
+	periodStart := inst.CreatedAt
+	if inst.LastMeteredAt != nil {
+		periodStart = *inst.LastMeteredAt
+	}
+
+	durationSeconds := deletedAt.Sub(periodStart).Seconds()
+	if durationSeconds <= 0 {
+		return
+	}
+
+	projectID := m.resolveProject(ctx, "", inst.Tenant)
+	entry := inventory.MeteringEntry{
+		ResourceType: "bare_metal",
+		ResourceID:   inst.InstanceID,
+		TenantID:     inst.Tenant,
+		ProjectID:    projectID,
+		MeterName:    "bm_uptime_seconds",
+		Value:        durationSeconds,
+		Unit:         "seconds",
+		PeriodStart:  periodStart,
+		PeriodEnd:    deletedAt,
+	}
+	if err := m.store.InsertMeteringEntry(ctx, entry); err != nil {
+		m.logger.Error("failed to insert final BM metering entry", "resource", instanceID, "error", err)
+	}
+
+	m.logger.Debug("final metering for deleted bare metal instance", "id", instanceID, "duration_seconds", durationSeconds)
+}
+
+// MaaS metering data passed from event ingestion.
+type MaaSUsage struct {
+	ModelID           string
+	ModelName         string
+	TenantID          string
+	UserID            string
+	State             string
+	TokensIn          int64
+	TokensOut         int64
+	CachedInputTokens int64
+	ReasoningTokens   int64
+	Requests          int64
+	EventTime         time.Time
+	DurationSeconds   float64
+}
+
+// MeterMaaSEvent produces metering entries from a MaaS usage event.
+// Unlike VM metering (sweep-based), MaaS metering is event-driven:
+// each event carries the consumption values directly.
+func (m *Meter) MeterMaaSEvent(ctx context.Context, usage MaaSUsage) error {
+	if !IsModelBillable(usage.State) {
+		return nil
+	}
+
+	periodStart := usage.EventTime.Add(-time.Duration(usage.DurationSeconds) * time.Second)
+	periodEnd := usage.EventTime
+
+	projectID := m.resolveProject(ctx, "", usage.TenantID)
+	entries := maasMeters(usage, projectID, periodStart, periodEnd)
+	if err := m.store.InsertMeteringEntryBatch(ctx, entries); err != nil {
+		m.logger.Error("failed to insert MaaS metering entries",
+			"model", usage.ModelID, "error", err)
+		return err
+	} else {
+		for _, entry := range entries {
+			metrics.MeteringEntriesCreated.WithLabelValues(entry.ResourceType, entry.MeterName).Inc()
+		}
+	}
+
+	m.logger.Debug("metered MaaS event", "model", usage.ModelID,
+		"tokens_in", usage.TokensIn, "tokens_out", usage.TokensOut, "requests", usage.Requests)
+	return nil
+}
+
+func maasMeters(usage MaaSUsage, projectID string, periodStart, periodEnd time.Time) []inventory.MeteringEntry {
+	var entries []inventory.MeteringEntry
+
+	if usage.TokensIn > 0 {
+		entries = append(entries, inventory.MeteringEntry{
+			ResourceType: "model",
+			ResourceID:   usage.ModelID,
+			TenantID:     usage.TenantID,
+			ProjectID:    projectID,
+			UserID:       usage.UserID,
+			MeterName:    "maas_tokens_in",
+			Value:        float64(usage.TokensIn),
+			Unit:         "tokens",
+			PeriodStart:  periodStart,
+			PeriodEnd:    periodEnd,
+		})
+	}
+
+	if usage.TokensOut > 0 {
+		entries = append(entries, inventory.MeteringEntry{
+			ResourceType: "model",
+			ResourceID:   usage.ModelID,
+			TenantID:     usage.TenantID,
+			ProjectID:    projectID,
+			UserID:       usage.UserID,
+			MeterName:    "maas_tokens_out",
+			Value:        float64(usage.TokensOut),
+			Unit:         "tokens",
+			PeriodStart:  periodStart,
+			PeriodEnd:    periodEnd,
+		})
+	}
+
+	if usage.Requests > 0 {
+		entries = append(entries, inventory.MeteringEntry{
+			ResourceType: "model",
+			ResourceID:   usage.ModelID,
+			TenantID:     usage.TenantID,
+			ProjectID:    projectID,
+			UserID:       usage.UserID,
+			MeterName:    "maas_requests",
+			Value:        float64(usage.Requests),
+			Unit:         "requests",
+			PeriodStart:  periodStart,
+			PeriodEnd:    periodEnd,
+		})
+	}
+
+	return entries
+}
+
+func computeInstanceMeters(inst inventory.ComputeInstanceRecord, instanceTypes map[string]*inventory.InstanceTypeRecord, projectID string, durationSeconds float64, periodStart, periodEnd time.Time) []inventory.MeteringEntry {
+	cores := inst.Cores
+	memGiB := inst.MemoryGiB
+
+	// Catalog fallback: if cores/memory are zero (OSAC removing these
+	// from ComputeInstance), resolve from the InstanceType catalog.
+	if cores == 0 && inst.InstanceType != "" {
+		if it, ok := instanceTypes[inst.InstanceType]; ok {
+			cores = it.Cores
+			memGiB = it.MemoryGiB
+		}
+	}
+
+	return []inventory.MeteringEntry{
+		{
+			ResourceType: "compute_instance",
+			ResourceID:   inst.InstanceID,
+			TenantID:     inst.Tenant,
+			ProjectID:    projectID,
+			InstanceType: inst.InstanceType,
+			MeterName:    "vm_uptime_seconds",
+			Value:        durationSeconds,
+			Unit:         "seconds",
+			PeriodStart:  periodStart,
+			PeriodEnd:    periodEnd,
+		},
+		{
+			ResourceType: "compute_instance",
+			ResourceID:   inst.InstanceID,
+			TenantID:     inst.Tenant,
+			ProjectID:    projectID,
+			InstanceType: inst.InstanceType,
+			MeterName:    "vm_cpu_core_seconds",
+			Value:        float64(cores) * durationSeconds,
+			Unit:         "core_seconds",
+			PeriodStart:  periodStart,
+			PeriodEnd:    periodEnd,
+		},
+		{
+			ResourceType: "compute_instance",
+			ResourceID:   inst.InstanceID,
+			TenantID:     inst.Tenant,
+			ProjectID:    projectID,
+			InstanceType: inst.InstanceType,
+			MeterName:    "vm_memory_gib_seconds",
+			Value:        float64(memGiB) * durationSeconds,
+			Unit:         "gib_seconds",
+			PeriodStart:  periodStart,
+			PeriodEnd:    periodEnd,
+		},
+	}
+}

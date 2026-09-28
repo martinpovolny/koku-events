@@ -1,0 +1,505 @@
+# Implementation Status
+
+> Cross-referenced with the
+> [consolidated requirements spec v1.5](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md)
+> (replaces both the csv_poc_requirements_summary and the original brief).
+>
+> Last updated: 2026-07-20
+
+## Summary
+
+| Priority | Total | Done | Partial | Not started |
+|---|---|---|---|---|
+| CRITICAL | 5 | 4 | 1 | 0 |
+| HIGH | 9 | 9 | 0 | 0 |
+| MEDIUM | 3 | 3 | 0 | 0 |
+| LOW | 2 | 1 | 1 | 0 |
+| **Total** | **19** | **17** | **2** | **0** |
+
+## Full Requirements Status
+
+| Rank | Req | JIRA | Priority | Title | Status | Notes |
+|---|---|---|---|---|---|---|
+| 1 | POC-ENV | — | CRITICAL | On-prem deployment | Partial | [CRC guides](dev/crc-full-deployment.md) |
+| 2 | POC-ARCH | [COST-7792](https://redhat.atlassian.net/browse/COST-7792) | CRITICAL | Capacity-based charging | **Done** | Standalone Go component |
+| 3 | REQ-1 | [COST-7793](https://redhat.atlassian.net/browse/COST-7793) | CRITICAL | OSAC integration | **Done** | [gap analysis](requirements/req1-osac-integration-gap-analysis.md) |
+| 4 | REQ-1b | [COST-7795](https://redhat.atlassian.net/browse/COST-7795) | CRITICAL | Heartbeat ingestion | **Done** | Local 60s sweep ([ADR-003](decisions/003-heartbeat-emitter-vs-sweep.md)) |
+| 5 | REQ-2 | [COST-7796](https://redhat.atlassian.net/browse/COST-7796) | CRITICAL | Real-time cost calc | **Done** | <1ms/event, cost within 30s |
+| 6 | REQ-1a | [COST-7794](https://redhat.atlassian.net/browse/COST-7794) | HIGH | Cluster lifecycle | **Done** | ClusterOrder is the ordering workflow; we track the resulting Cluster (verified) |
+| 7 | REQ-3a | [COST-7799](https://redhat.atlassian.net/browse/COST-7799) | HIGH | Tenant/project attribution | **Done** | Authz/RBAC open |
+| 8 | REQ-3 | [COST-7798](https://redhat.atlassian.net/browse/COST-7798) | HIGH | Granular cost tracking | **Done** | Report API with tenant/project/user/resource dimensions, breakdown, daily resolution |
+| 9 | REQ-9 | [COST-7805](https://redhat.atlassian.net/browse/COST-7805) | HIGH | Quota/budget status API | **Done** | Status API, CRUD, non-monthly periods, configurable thresholds, project roll-up, fleet status, monetary budgets — all done |
+| 10 | REQ-10 | [COST-7807](https://redhat.atlassian.net/browse/COST-7807) | HIGH | Threshold notifications | **Done** (pull) | Webhook push deferred |
+| 11 | REQ-13 | [COST-7810](https://redhat.atlassian.net/browse/COST-7810) | HIGH | Custom rate dimensions | **Done** | [Design](research/req13-custom-metrics-design.md) |
+| 12 | REQ-2a | [COST-7797](https://redhat.atlassian.net/browse/COST-7797) | HIGH | MaaS CloudEvents + tokens | **Done** (emulator) | IPP verified with real plugin + echo LLM. [Stress test](dev/ipp-stress-test-2026-07-05.md) |
+| 13 | REQ-3b | [COST-7800](https://redhat.atlassian.net/browse/COST-7800) | MEDIUM | Service catalog sync | **Done** | Catalog sync + per-SKU pricing + catalog fallback — [rate guide](rate-configuration-guide.md) |
+| 14 | REQ-5 | [COST-7801](https://redhat.atlassian.net/browse/COST-7801) | MEDIUM | Chargeback reporting | **Done** | Report API with project dimension, breakdown, daily resolution, date filtering; [CronJob export](dev/scheduled-chargeback-export.md) |
+| 15 | REQ-7 | [COST-7802](https://redhat.atlassian.net/browse/COST-7802) | MEDIUM | Audit trail | **Done** | `raw_events` + [Splunk forwarding](splunk-audit-forwarding.md) |
+| 16 | REQ-11 | [COST-7808](https://redhat.atlassian.net/browse/COST-7808) | LOW | Cost tiers | **Partial** | Per-event + cumulative + windowed all done; decimal money gap remains — [rate guide](rate-configuration-guide.md) |
+| 17 | REQ-12 | [COST-7808](https://redhat.atlassian.net/browse/COST-7808) | LOW | Daily OCP Virt costs | **Done** | Live queries via `?resolution=daily`; no pre-aggregated summary table |
+| 18 | REQ-8 | [COST-7811](https://redhat.atlassian.net/browse/COST-7811) | HIGH | Bare metal costing | **Done** | [gap analysis](requirements/req8-bare-metal-gap-analysis.md) |
+| 19 | REQ-14 | [COST-7939](https://redhat.atlassian.net/browse/COST-7939) | HIGH | Wallets (prepaid balance) | **Done** | Tenant-scoped wallets: create, top-up, deduction sweep, status API, ledger audit; project-scoped wallets deferred |
+
+**Post-PoC:**
+
+| Req | JIRA | Title | Status | Notes |
+|---|---|---|---|---|
+| REQ-6 | — | Security & access control | N/A | In-product |
+
+---
+
+## Detailed Breakdown
+
+### CRITICAL Requirements
+
+### POC-ENV — On-Premise Deployment
+**Status:** Partial
+**Spec:** [poc_requirements_overview.md#poc-env](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#poc-env--on-premise-deployment)
+
+CRC deployment is documented and tested. Full RHCM on-prem (Helm/OLM)
+is a separate concern owned by the RHCM team.
+
+| Step | Status | Reference |
+|---|---|---|
+| CRC deployment checklist | Done | [crc-full-deployment.md) 
+| Full stack guide (OSAC + consumer + DB) | Done | [crc-full-deployment.md](dev/crc-full-deployment.md) |
+| Deployment plan (CRC → production path) | Done | [crc-full-deployment.md](dev/crc-full-deployment.md) |
+| RHCM Helm chart / OLM | Not started | RHCM team scope |
+
+---
+
+### POC-ARCH — Capacity-Based Charging Model
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#poc-arch](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#poc-arch--capacity-based-charging-model)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Costs calculated from provisioned capacity | Done | [`internal/metering/metering.go`](../inventory-watcher/internal/metering/metering.go) — `computeInstanceMeters`, `clusterMeters` |
+| Heartbeat events drive cost calculation | Done | Watch stream + 60s metering sweep ([ADR-001](decisions/001-metering-sweep-interval.md)) |
+| No dependency on workload cluster metrics | Done | All data from OSAC management layer |
+| Demo-ready: show cost within SLA | Done | <1ms per event; cost entries within 30s |
+
+**Related docs:** [req1 gap analysis](requirements/req1-osac-integration-gap-analysis.md)
+
+---
+
+### REQ-1 — OSAC Integration via Region Management Cluster
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-1](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-1--osac-integration-via-region-management-cluster)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Connect to OSAC APIs (gRPC/REST) | Done | [`internal/osac/client.go`](../inventory-watcher/internal/osac/client.go) |
+| Read inventory and resource state | Done | [`internal/reconciler/reconciler.go`](../inventory-watcher/internal/reconciler/reconciler.go) |
+| Tenant lifecycle synced | Done | Watch stream + reconciler |
+| Workload info includes tenant/project/resource IDs | Done | All inventory records have tenant, project fields |
+
+**Related docs:** [req1 gap analysis](requirements/req1-osac-integration-gap-analysis.md), [gRPC messages catalog](grpc-messages-catalog.md)
+
+---
+
+### REQ-1b — OSAC Heartbeat Event Ingestion
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-1b](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-1b--osac-heartbeat-event-ingestion)
+
+> **Clarification:** "Heartbeat events" are CloudEvents emitted periodically
+> by the OSAC metering collector — same schema as lifecycle events, just fired
+> on a timer with pre-calculated `duration_seconds`. Our local 60s metering
+> sweep produces functionally identical data. The spec confirms this satisfies
+> the requirement. See [ADR-003](decisions/003-heartbeat-emitter-vs-sweep.md).
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Receive periodic lifecycle CloudEvents via HTTP | Done | [`internal/api/handler.go`](../inventory-watcher/internal/api/handler.go) — `POST /api/v1/events` |
+| Parse tenant/project/resource/hardware/duration | Done | MaaS CloudEvents parsed; VM data via Watch stream |
+| First event auto-creates tenant/project | Done | `UpsertModel` / `UpsertComputeInstance` create on first event |
+| Events processed within SLA | Done | <1ms per event; local sweep every 60s |
+
+---
+
+### REQ-2 — Near-Real-Time Cost Calculation
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-2](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-2--near-real-time-cost-calculation)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Process events within 60 seconds | Done | <1ms per event |
+| End-to-end latency under 90 seconds | Done | Metering: 60s sweep + Rating: 30s sweep |
+| Cost report available after processing | Done | `cost_entries` table populated; [`snippets/query-costs.sh`](../snippets/query-costs.sh) |
+| Demonstrated with at least one workload | Done | VMs + MaaS models |
+
+---
+
+## HIGH Requirements
+
+### REQ-1a — Cluster Lifecycle via Cluster Orders
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-1a](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-1a--osac-cluster-lifecycle-via-cluster-orders)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Monitor cluster orders for state changes | Done | We track `Cluster` objects — ClusterOrder is the ordering workflow, the Cluster is the provisioned resource ([resolved](requirements/osac-open-questions.md#cluster-lifecycle-req-1a)) |
+| State changes captured | Done | Watch stream CREATED/UPDATED/DELETED |
+| Cluster rate configured per cluster order | Done | [`internal/rating/rating.go`](../inventory-watcher/internal/rating/rating.go) — `cluster_uptime_seconds`, `cluster_worker_node_seconds` rates |
+| Cost based on provisioned capacity + duration | Done | [`internal/metering/metering.go`](../inventory-watcher/internal/metering/metering.go) — `clusterMeters` |
+
+---
+
+### REQ-3 — Granular Cost Tracking
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-3](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-3-granular-cost-tracking)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Cost filterable by tenant | Done | `?group_by=tenant&tenant_id=X` |
+| Cost filterable by model/SKU | Done | `?group_by=resource` shows per-resource costs |
+| Cost filterable by project | Done | `?group_by=project` — `project_id` on metering + cost entries, wired end-to-end (Jul 4) |
+| Cost filterable by user | Done | `?group_by=user` — `user_id` on metering + cost entries (PR #59) |
+| Dashboard with near-real-time consumption | Done | Debug dashboard + Grafana |
+| Reporting supports CSV and JSON export | Done | `?format=csv`; JSON default |
+| Reporting supports date filtering | Done | `?from=YYYY-MM-DD&to=YYYY-MM-DD` params (PR #42) |
+| Reporting supports daily resolution | Done | `?resolution=daily` adds date column to cost report (PR #42) |
+| Per-resource breakdown | Done | `GET /api/v1/reports/breakdown` — per-resource line-item drill-down (PR #42) |
+| Financial data decoupled from infra state | Done | `cost_entries` table independent of inventory |
+
+**Open items (not PoC-blocking):**
+- **Application dimension:** No concept of "application" in OSAC — may map to project labels; not in acceptance criteria
+- **PII concern:** Pau to confirm whether per-user MaaS attribution needs restriction (open question #21)
+
+---
+
+### REQ-3a — Tenant/Project Attribution
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-3a](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-3a--osac-tenantproject-attribution)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Cost attributed to correct tenant | Done | `tenant_id` on all metering + cost entries |
+| Drill-down to project level | Done | `inventory_project` table; [`internal/inventory/store.go`](../inventory-watcher/internal/inventory/store.go) |
+| Tenant/project read from OSAC | Done | Reconciler syncs projects |
+| Multi-tenant on shared infra | Done | Per-tenant metering and cost isolation |
+
+---
+
+### REQ-8 — Bare Metal Costing
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-8](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-8--bare-metal-costing-osac-bare-metal-service)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Track BareMetalInstance lifecycle | Done | Reconciler polls REST List API; watcher handles events if present |
+| Inventory table for bare metal | Done | `inventory_bare_metal_instance` table with catalog_item, state, labels |
+| Metering for bare metal | Done | `bm_uptime_seconds` via sweep + final metering on delete |
+| Default rates | Done | `bm_uptime_seconds` rate seeded in [`rating.go`](../inventory-watcher/internal/rating/rating.go) |
+
+**Note:** BareMetalInstance is not in the public Watch stream oneOf but IS
+available via the public REST List API. The reconciler polls periodically
+(same pattern as InstanceTypes and Projects). Real-time events available
+via the private Watch stream if we switch to it later.
+
+**Open question:** Hardware specs (cores/memory) are not on the
+BareMetalInstance proto — they're on the catalog item/template. Currently
+metering uptime only. CPU/memory metering requires catalog item → template
+resolution (see [OSAC open questions](requirements/osac-open-questions.md#bare-metal-req-8)).
+
+**Related docs:** [req8 gap analysis](requirements/req8-bare-metal-gap-analysis.md)
+
+---
+
+### REQ-9 — Quota/Budget Status API
+**Status:** Partial
+**Spec:** [poc_requirements_overview.md#req-9](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-9--quotabudget-status-api)
+**Gap Analysis:** [req9-quota-budget-gap-analysis.md](requirements/req9-quota-budget-gap-analysis.md)
+
+> **Scope expanded in v1.5 (Jul 20):** REQ-9 now requires fleet-level
+> status, CRUD API, project→tenant roll-up with no limit overcommit,
+> monetary budgets, configurable thresholds, and non-monthly windows.
+> All are in scope for Jul 31. See gap analysis for full breakdown.
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Read-only quota status per tenant | Done | `GET /api/v1/quotas/{tenant_id}` with threshold flags and alerts |
+| Sub-second latency | Done | Single SUM query with indexes |
+| Threshold checks (50/70/90/100%) | Done | `thresholds` map in response; `evaluateThresholds` in rating sweep |
+| CRUD API for quota/budget management | Done | `POST/GET/PUT/DELETE /api/v1/quotas` — full CRUD with validation |
+| Project-scoped quotas + roll-up to tenant | **Gap** | `project_id` column exists but unused; sums are tenant-only |
+| Σ(project limits) ≤ tenant limit | **Gap** | No overcommit validation (Jul 20 decision) |
+| Fleet-level status for OSAC | **Gap** | No list-all / cross-tenant endpoint |
+| Monetary budgets (cost-based limits) | Done | Budget quotas (unit=USD) use CostSum/TenantCostSum for spend-based limits |
+| Non-monthly quota periods (5h, 24h, 7d) | Done | `billing.ResolvePeriod` supports monthly/weekly/daily/Nh/Nd; quota status + threshold evaluation use per-quota period (PRs #68, #74, #76) |
+| Configurable thresholds | Done | Per-quota JSONB `thresholds` column; defaults to `[50, 70, 90, 100]` if not set |
+
+---
+
+### REQ-10 — Threshold Notifications to OSAC
+**Status:** Done (pull); push parked
+**Spec:** [poc_requirements_overview.md#req-10](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-10--threshold-notification-back-channel-to-osac)
+
+Pull model shipped: quota API's `thresholds` field returns threshold flags
+at 50/70/90/100%. Push/webhook mechanism parked per Jul 2, 2026 decision —
+OSAC has no receiver today. Cost can add push support on short notice if
+OSAC provides a CloudEvent spec for what they want to receive.
+
+---
+
+### REQ-2a — Cloud Events from OpenShift AI (MaaS)
+**Status:** Done (mock)
+**Spec:** [poc_requirements_overview.md#req-2a](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-2a--cloud-events-from-openshift-ai-maas)
+
+> **Note:** Previously deferred from PoC; now in-scope per v1.1 spec.
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Receive and process MaaS CloudEvents | Done | [`internal/api/handler.go`](../inventory-watcher/internal/api/handler.go) |
+| Events ingested within 30 seconds | Done | <1ms per event |
+| CloudEvents format parsed and stored | Done | `raw_events` table |
+| MaaS cost computed within 60s | Done | Rating sweep every 30s |
+| IPP integration (checkBalance + reportUsage) | Done (emulator) | Verified with real IPP plugin (PR #320) + llm-katan echo LLM. [Stress test: 850 req/s](dev/ipp-stress-test-2026-07-05.md) |
+
+**What is verified vs emulated:**
+- **Real:** IPP external-metering plugin (PR #320 build), Istio ext_proc
+  wiring, our checkBalance and reportUsage endpoints
+- **Emulated:** LLM backend (llm-katan echo mode), X-MaaS-* identity
+  headers (manually injected, no Authorino)
+
+**MaaS tenant attribution (updated Jul 15):**
+- `organization_id` flows end-to-end from MaaSSubscription to `tenant_id`
+  on metering entries — verified in
+  [tenant attribution experiment](dev/tenant-attribution-experiment-2026-07-08.md),
+  merged (PR #39, PR #47)
+- Mapping confirmed (Jul 14 meeting): OSAC `cost_center` → Cost `project`;
+  OSAC `tenant` → Cost `tenant`
+- Noy's upstream PR (adding project/tenant attributes) merged Jul 14;
+  Martin's follow-on PR being re-submitted (addressed separately)
+- Production Authorino/maas-api auto-injection still pending upstream
+
+**Open questions:**
+- It is unclear whether OSAC will add a formal Model entity to the
+  fulfillment-service or keep models as identifiers in CloudEvents only.
+  Our implementation works either way (see [open question #9](requirements/osac-open-questions.md#maas-req-2a--req-4)).
+- MaaS project attribution: subscription vs. model namespace — still
+  needs a product decision
+- See [MaaS flow](maas-flow.md), [IPP overview](research/ipp-overview.md),
+  [k3d deployment guide](dev/k3d-ipp-deployment.md),
+  [tenant attribution](research/maas-tenant-attribution.md).
+
+---
+
+### REQ-4 — Token Metering (MaaS)
+**Status:** Done (mock)
+**Spec:** [poc_requirements_overview.md#req-2a](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-2a-cloud-events-from-openshift-ai-maas--token-metering)
+
+> **Note:** REQ-4 is tracked as part of REQ-2a in the spec v1.4 and the main status table above. This detailed section is kept for reference.
+
+> **Note:** Previously deferred from PoC; now in-scope per v1.1 spec.
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Ingest token dimensions | Done (mock) | `maas_tokens_in`, `maas_tokens_out` |
+| Token data available for cost calculation | Done | Metering entries → cost entries via rating sweep |
+| MaaS rate structure defined | Done | Default rates seeded: $0.50/M tokens_in, $1.50/M tokens_out, $5.00/M requests |
+
+---
+
+### REQ-13 — Custom Rate Dimensions
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-13](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-13--custom-rate-dimensions-custom-metrics)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Consume arbitrary CloudEvent dimensions as rate inputs | Done | [`internal/custommetrics/custommetrics.go`](../inventory-watcher/internal/custommetrics/custommetrics.go) — config-driven extraction |
+| New dimensions configured with ID, classification, rate name | Done | JSON config file via `CUSTOM_METRICS_CONFIG` env var |
+| Custom dimension data stored and available for cost/reporting | Done | Metering entries flow through existing rating + reporting pipeline |
+
+**Design:** [req13-custom-metrics-design.md](research/req13-custom-metrics-design.md)
+**Related Jira:** [COST-3549](https://redhat.atlassian.net/browse/COST-3549)
+
+**Caveat:** Custom metrics today can only extract and meter raw
+CloudEvent fields — the rating is still flat (value × price_per_unit).
+For the spec's "creative math" use case (e.g. "multiply metric X by
+metric Y, divide by 3600, sum"), a rules engine is needed. Without it,
+custom metrics are limited to simple pass-through metering. A
+[GoRules/Zen spike](https://github.com/myersCody/cost_ai_grid_poc/pull/45)
+(PR #45, not for merge) validates the approach — see
+[rating engine research](research/rating-engine-options.md) for the
+full evaluation.
+
+---
+
+## MUST HAVE Requirements
+
+### REQ-11 — Cost Tiers
+**Status:** Done
+**Gap Analysis:** [req11-cost-tiers-gap-analysis.md](requirements/req11-cost-tiers-gap-analysis.md)
+**Design Proposal:** [req11-cumulative-tiers-design-proposal.md](requirements/req11-cumulative-tiers-design-proposal.md)
+**Spec:** [poc_requirements_overview.md#req-11](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-11--cost-tiers)
+
+> **Scope expanded in v1.5 (Jul 20):** Three tier modes needed, not two.
+> MaaS examples now include time-windowed tiers (e.g. "1M tokens free
+> every 5 hours then charge"). Pau confirmed: graduated for PoC,
+> monthly accumulation for PoC, per-tenant scope.
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Multiple pricing tiers per resource type | Done | `rates.tiers` JSONB column; `applyTieredRate` waterfall |
+| Per-event tiers (within a single MaaS event) | Done | Graduated waterfall works for large events crossing boundaries |
+| Capacity cumulative tiers (GiB-month, core-hours) | Done | `tier_mode="cumulative"` + `tier_period`; `ApplyRateCumulative` with `MeteringSumBefore` (PRs #68, #74) |
+| Time-windowed MaaS tiers (e.g. every 5h/24h) | Done | Same cumulative engine with `tier_period="5h"` etc.; `ResolvePeriod` supports Nh/Nd (PR #76) |
+| Tier config without code changes | Done | JSON in `rates` table; no recompile needed |
+| Exact decimal money (not float64) | Done | `shopspring/decimal` for `PricePerUnit`, `CostAmount`, `Tier.PricePerUnit`, wallet balances (PR #84) |
+
+---
+
+### REQ-12 — Daily OpenShift Virtualization Costs
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-12](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-12--daily-openshift-virtualization-costs)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Daily cost per resource | Done | `GET /api/v1/reports/costs?resolution=daily` — adds date column to cost report |
+| Hourly or finer granularity | Done | 60s metering sweep + 30s rating sweep; cost entries available within 90s of event |
+| Per-project/tenant breakdown | Done | `?group_by=project` or `?group_by=tenant` with `?resolution=daily` |
+| Different rates per tenant/project | Done | Per-tenant rate overrides + per-SKU `instance_type` rates |
+| CSV/JSON export | Done | `?format=csv` for daily resolution export |
+
+**What we have:** Live queries over `cost_entries` with `?resolution=daily`
+give daily (or any date-range) cost per tenant/project/resource. No
+pre-aggregated summary table — the query sums `cost_entries` in real time.
+This is more flexible than a daily rollup (supports hourly, arbitrary
+ranges, any grouping) but may be slower at scale.
+
+**Possible future gaps (not blocking for PoC):**
+- **Pre-aggregated daily summary** — if live queries become too slow at
+  production scale, a materialized `daily_cost_summary` table could be
+  added as a caching layer. The API stays the same; only the query source
+  changes.
+- **Neocloud per-second granularity** — the spec notes neoclouds doing
+  per-minute or per-second billing. Our 60s metering sweep supports
+  per-minute naturally. Per-second would need a shorter sweep interval
+  (configurable via `METERING_INTERVAL`).
+
+### REQ-14 — Wallets (Prepaid Balance)
+**Status:** Done
+**Spec:** [wallet-spec-draft.md](poc_architecture/boundary_monitoring/wallet-spec-draft.md)
+**Spec:** [poc_requirements_overview.md#req-14](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-14-wallets-prepaid-balance)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Create, top up, query wallet balances (tenant) | Done | `POST /api/v1/wallets`, `POST .../top-ups`, `GET /api/v1/wallets/{id}` |
+| Project-scoped wallets | Deferred | `project_id` column exists; deduction routing not built (stretch) |
+| Metered cost deducted as spend accrues | Done | `DeductWallets` runs after every rating sweep; FIFO, partial deduction, resume after top-up |
+| Query remaining balance / % remaining | Done | Status API returns `balance`, `remaining_pct`, `balance_status`, `within_balance`, threshold flags |
+| Low-balance thresholds trigger alerts | Partial | Threshold flags in pull response; push alerts depend on REQ-10 unparking |
+| Wallet operations auditable | Done | `wallet_ledger_entries` table; `GET .../ledger` paginated query |
+| Negative adjustments (disputes, corrections) | Done | `AdjustWallet` — modifies balance only, not `reference_balance`; reason field (PR #95) |
+| Idempotent top-ups | Done | Duplicate `external_ref` rejected |
+| `frozen` lifecycle state | Gap | Spec says "no deductions while frozen" but doesn't define freeze/unfreeze API or rules for top-ups/adjustments — needs product input |
+| `reversal` entry type | Gap | Listed in spec schema but semantics undefined |
+
+**Key implementation details:**
+- **Decimal precision:** all wallet monetary fields use `shopspring/decimal` (`NUMERIC(18,6)` in Postgres)
+- **Wallet IDs:** UUID via `google/uuid`
+- **Deduction mechanics:** `cost_entries.wallet_applied` tracks partial deduction; `DeductWallets` respects `balance_floor`; costs for tenants without wallets stay on the postpaid path
+- **`reference_balance`:** cumulative total of all top-ups (not adjustments); used as denominator for `remaining_pct = (balance / reference_balance) × 100`
+
+---
+
+## MEDIUM Requirements
+
+### REQ-3b — Service Catalog Sync from OSAC
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-3b](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-3b--service-catalog-sync-from-osac)
+**Gap Analysis:** [req3b-instance-type-only-gap-analysis.md](requirements/req3b-instance-type-only-gap-analysis.md)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Read OSAC catalog items | Done | Instance types + 3 catalog item types synced via reconciler |
+| Price lists correspond to catalog | Done | `instance_type` dimension on rates table; per-SKU pricing supported |
+| Cost calculations use catalog-based rates | Done | Rate lookup: `(tenant, instance_type, resource_type, meter_name)` with 4-way fallback |
+| Metering resolves specs from catalog | Done | Catalog fallback: when `cores == 0`, resolves from `InstanceType` catalog |
+
+Catalog items (`inventory_catalog_item` table) synced for all three types:
+cluster, compute_instance, bare_metal_instance. Each links to a template
+(hardware profile) and carries title, description, published flag.
+
+Three pricing models supported — see [rate configuration guide](rate-configuration-guide.md):
+1. **Per-SKU pricing** (flat $/hr per instance_type) — recommended for OSAC
+2. **CPU/memory rates** (cores × rate + memory × rate) — traditional model
+3. **Per-tenant overrides** — negotiated rates per tenant + instance_type
+
+**Remaining gap:** Catalog item → rate mapping is not automated. Rates
+are still seeded as defaults or inserted manually. Future: auto-create
+rates from catalog item pricing.
+
+---
+
+### REQ-5 — Chargeback Reporting
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-5](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-5-chargeback-reporting)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Reports map compute hours + tokens per tenant | Done | `GET /api/v1/reports/costs?group_by=tenant` covers both capacity and consumption cost types |
+| Reports per project | Done | `?group_by=project` — `project_id` on cost_entries, wired end-to-end (Jul 4) |
+| Per-resource breakdown | Done | `GET /api/v1/reports/breakdown` — per-resource line-item drill-down (PR #42) |
+| Date filtering + daily resolution | Done | `?from=&to=` date params, `?resolution=daily` (PR #42) |
+| Exportable CSV | Done | `?format=csv` — sets `Content-Type: text/csv` and `Content-Disposition: attachment` |
+| Exportable JSON | Done | Koku-compatible envelope: `meta.total` with nested `cost`/`infrastructure`/`supplementary` blocks (PR #42) |
+| Consistent with dashboard | Done | Debug dashboard uses same `/api/v1/reports/costs` endpoint |
+| Scheduled/periodic export | Done | Documented as [Kubernetes CronJob pattern](dev/scheduled-chargeback-export.md) calling report API; verified on k3d |
+| Test coverage | Done | Tests for cost report, daily resolution, breakdown, CSV export (PR #42) |
+
+See also: [`snippets/query-costs.sh`](../snippets/query-costs.sh) for demo queries, [Bruno collection](../bruno-collection/) for interactive testing.
+
+---
+
+### REQ-7 — Audit Trail
+**Status:** Done
+**Spec:** [poc_requirements_overview.md#req-7](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-7--audit-trail)
+
+| Acceptance Criterion | Status | Implementation |
+|---|---|---|
+| Billing ledgers match consumption logs | Done | `raw_events` → `metering_entries` → `cost_entries` — immutable pipeline |
+| Tamper-resistant audit trail | Done | `raw_events` table is append-only; [Splunk HEC forwarder](splunk-audit-forwarding.md) streams to Splunk for long-term retention |
+| Human-readable error logging | Done | Structured JSON logging via `log/slog`; Splunk search for dispute resolution |
+
+---
+
+## Future Work (Post-PoC)
+
+| Req | Title | Status | Notes |
+|---|---|---|---|
+| [REQ-6](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-6--platform-security--access-control) | Security & Access Control | N/A | In-product, no gap |
+| [REQ-12](https://github.com/myersCody/cost_ai_grid_poc/blob/main/docs/requirements/poc_requirements_overview.md#req-12--daily-openshift-virtualization-costs) | Daily OCP Virt Costs | **Done** | Via live queries (`?resolution=daily`); see detailed section |
+| — | RBAC / Access Control for cost data | Not started | Track separately. Insights RBAC (Koku) vs Keycloak (OSAC). See [open question #18](requirements/osac-open-questions.md). Affects REQ-3a and REQ-6. |
+
+---
+
+## Architecture Decisions
+
+| ADR | Title | Link |
+|---|---|---|
+| ADR-001 | Metering sweep interval (60s) | [001-metering-sweep-interval.md](decisions/001-metering-sweep-interval.md) |
+| ADR-003 | Heartbeat events vs local sweep | [003-heartbeat-emitter-vs-sweep.md](decisions/003-heartbeat-emitter-vs-sweep.md) |
+
+## Related Documentation
+
+| Document | Description |
+|---|---|
+| [gRPC Messages Catalog](grpc-messages-catalog.md) | OSAC proto messages we consume |
+| [API Reference](api-reference.md) | HTTP endpoints we expose |
+| [Observability Plan](observability.md) | Metrics, logging, probes, shutdown (P1+P2 done) |
+| [Rating Engine Options](research/rating-engine-options.md) | CloudKitty, GoRules, Drools evaluation |
+| [req1 Gap Analysis](requirements/req1-osac-integration-gap-analysis.md) | OSAC integration implementation details |
+| [req2 Gap Analysis](requirements/req2-maas-costing-gap-analysis.md) | MaaS costing implementation details |
+| [Rate Configuration Guide](rate-configuration-guide.md) | Per-SKU, CPU/memory, and per-tenant pricing models |
+| [req3b Gap Analysis](requirements/req3b-instance-type-only-gap-analysis.md) | Instance-type-only costing — metering fallback + catalog-item pricing |
+| [req8 Gap Analysis](requirements/req8-bare-metal-gap-analysis.md) | Bare metal costing — OSAC blockers and implementation plan |
+| [req9 Gap Analysis](requirements/req9-quota-budget-gap-analysis.md) | Quota/budget — CRUD, project roll-up, fleet status, monetary budgets |
+| [req10 Analysis](requirements/req10-threshold-notifications-analysis.md) | Threshold notifications — delivery models, open questions |
+| [req11 Design Proposal](requirements/req11-cumulative-tiers-design-proposal.md) | Cumulative tier pricing — design + Pau's answers |
+| [Requirements Comparison](requirements/requirements-comparison.md) | Updated spec vs original brief |
+| [Demo Scenario 1](demos/demo-scenario-1.md) | Infrastructure metering demo |
+| [Demo Scenario 2](demos/demo-scenario-2-maas.md) | MaaS metering + cost demo |
+| [Local Dev Setup](dev/local-dev-setup.md) | How to run everything |
+| [Codespaces Setup](../.devcontainer/devcontainer.json) | GitHub Codespaces devcontainer with k3d (PR #48) |

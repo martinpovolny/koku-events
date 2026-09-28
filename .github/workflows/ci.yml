@@ -1,0 +1,220 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: inventory-watcher
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: inventory-watcher/go.mod
+          cache-dependency-path: inventory-watcher/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: inventory-watcher
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # GO-2026-6061 and GO-2026-6348 (grpc-go HTTP/2 transport) suppressed:
+          # Upgrading grpc-go ≥1.67 breaks ALPN negotiation with OSAC
+          # fulfillment-service (does not advertise h2 in TLS ALPN).
+          # PR #112 pinned v1.66.0 as workaround. Keep the pin until OSAC adds
+          # h2 ALPN support, or we use grpc-go experimental
+          # credentials.NewTLSWithALPNDisabled (temporary upstream API).
+          set +e
+          output=$(govulncheck ./... 2>&1)
+          rc=$?
+          echo "$output"
+          if [ $rc -eq 0 ]; then
+            exit 0
+          fi
+          # Check if the only finding is the suppressed vuln
+          unsuppressed=$(echo "$output" | grep "^Vulnerability #" | grep -v -E "GO-2026-6061|GO-2026-6348" || true)
+          if [ -z "$unsuppressed" ]; then
+            echo "::notice::GO-2026-6061 and GO-2026-6348 suppressed (grpc-go ALPN incompatibility with OSAC)"
+            exit 0
+          fi
+          echo "::error::Unsuppressed vulnerabilities found"
+          exit 1
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: inventory-watcher
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: inventory-watcher/go.mod
+          cache-dependency-path: inventory-watcher/go.sum
+
+      - name: Build consumer
+        run: go build -o /dev/null ./cmd/consumer/
+
+      - name: Build maas-simulator
+        run: go build -o /dev/null ./cmd/maas-simulator/
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: inventory-watcher
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: pass
+          POSTGRES_DB: costdb_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd="pg_isready -U user -d costdb_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: inventory-watcher/go.mod
+          cache-dependency-path: inventory-watcher/go.sum
+
+      - name: Run tests
+        env:
+          TEST_DB_URL: postgres://user:pass@localhost:5434/costdb_test
+        run: go test -race -count=1 -timeout 120s -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: |
+          echo '### Test Coverage' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          go tool cover -func=coverage.out | grep -E 'total:|\.go:' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  links:
+    name: Check Links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: inventory-watcher/go.mod
+          cache-dependency-path: inventory-watcher/go.sum
+
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --no-progress 'docs/**/*.md' 'README.md' 'CLAUDE.md'
+          fail: true
+
+      - name: Validate OpenAPI spec
+        run: |
+          pip install openapi-spec-validator -q
+          cd inventory-watcher && make validate-spec
+
+      - name: Check generated code is up to date
+        run: cd inventory-watcher && make check-generated
+
+  agent-lint:
+    name: Agent Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kube-cost-agent
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: kube-cost-agent/go.mod
+          cache-dependency-path: kube-cost-agent/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: kube-cost-agent
+
+  agent-build:
+    name: Agent Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kube-cost-agent
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: kube-cost-agent/go.mod
+          cache-dependency-path: kube-cost-agent/go.sum
+
+      - name: Build agent
+        run: go build -o /dev/null ./cmd/main.go
+
+  agent-test:
+    name: Agent Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kube-cost-agent
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: kube-cost-agent/go.mod
+          cache-dependency-path: kube-cost-agent/go.sum
+
+      - name: Run tests
+        run: go test -race -count=1 -timeout 60s ./...
+
+  container-build:
+    name: Container Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build container image
+        uses: docker/build-push-action@v7
+        with:
+          context: inventory-watcher
+          file: inventory-watcher/Containerfile
+          push: false
+          tags: cost-event-consumer:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

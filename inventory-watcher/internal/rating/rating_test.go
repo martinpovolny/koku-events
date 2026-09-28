@@ -1,0 +1,388 @@
+package rating
+
+import (
+	"testing"
+
+	"github.com/osac-project/cost-event-consumer/internal/inventory"
+	"github.com/shopspring/decimal"
+)
+
+func d(f float64) decimal.Decimal { return decimal.NewFromFloat(f) }
+
+func ptr(f float64) *float64 { return &f }
+
+func TestApplyRate_Flat(t *testing.T) {
+	rate := inventory.RateRecord{PricePerUnit: d(0.01)}
+
+	tests := []struct {
+		name  string
+		value float64
+		want  decimal.Decimal
+	}{
+		{"zero value", 0, decimal.Zero},
+		{"unit value", 1, d(0.01)},
+		{"typical VM uptime (3600s)", 3600, d(36.0)},
+		{"fractional", 0.5, d(0.005)},
+		{"large value (1M tokens)", 1_000_000, d(10_000)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ApplyRate(tc.value, rate)
+			if !got.Equal(tc.want) {
+				t.Errorf("ApplyRate(%v) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyRate_Tiered(t *testing.T) {
+	rate := inventory.RateRecord{
+		Tiers: []inventory.Tier{
+			{UpTo: ptr(100), PricePerUnit: d(0.10)},
+			{UpTo: ptr(500), PricePerUnit: d(0.05)},
+			{UpTo: nil, PricePerUnit: d(0.01)},
+		},
+	}
+
+	tests := []struct {
+		name  string
+		value float64
+		want  decimal.Decimal
+	}{
+		{"within first tier", 50, d(5.0)},
+		{"exactly at first tier boundary", 100, d(10.0)},
+		{"into second tier", 200, d(10.0 + 5.0)},
+		{"exactly at second tier boundary", 500, d(10.0 + 20.0)},
+		{"into unlimited tier", 1000, d(10.0 + 20.0 + 5.0)},
+		{"zero", 0, decimal.Zero},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ApplyRate(tc.value, rate)
+			if !got.Equal(tc.want) {
+				t.Errorf("ApplyRate(%v) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyRate_SingleUnlimitedTier(t *testing.T) {
+	rate := inventory.RateRecord{
+		Tiers: []inventory.Tier{
+			{UpTo: nil, PricePerUnit: d(0.02)},
+		},
+	}
+	got := ApplyRate(500, rate)
+	if !got.Equal(d(10.0)) {
+		t.Errorf("got %v, want 10.0", got)
+	}
+}
+
+func TestApplyRate_FreeTierThenPaid(t *testing.T) {
+	rate := inventory.RateRecord{
+		Tiers: []inventory.Tier{
+			{UpTo: ptr(20), PricePerUnit: decimal.Zero},
+			{UpTo: ptr(120), PricePerUnit: d(0.08)},
+			{UpTo: nil, PricePerUnit: d(0.07)},
+		},
+	}
+
+	tests := []struct {
+		name  string
+		value float64
+		want  decimal.Decimal
+	}{
+		{"within free tier", 10, decimal.Zero},
+		{"exactly at free tier", 20, decimal.Zero},
+		{"into paid tier", 50, d(30 * 0.08)},
+		{"into final tier", 200, d(100*0.08 + 80*0.07)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ApplyRate(tc.value, rate)
+			if !got.Equal(tc.want) {
+				t.Errorf("ApplyRate(%v) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyRate_TieredOverridesFlat(t *testing.T) {
+	rate := inventory.RateRecord{
+		PricePerUnit: d(999.0),
+		Tiers: []inventory.Tier{
+			{UpTo: nil, PricePerUnit: d(0.01)},
+		},
+	}
+	got := ApplyRate(100, rate)
+	if !got.Equal(d(1.0)) {
+		t.Errorf("tiers should override PricePerUnit; got %v, want 1.0", got)
+	}
+}
+
+func TestApplyRate_EmptyTiers(t *testing.T) {
+	rate := inventory.RateRecord{
+		PricePerUnit: d(0.05),
+		Tiers:        []inventory.Tier{},
+	}
+	got := ApplyRate(100, rate)
+	if !got.Equal(d(5.0)) {
+		t.Errorf("empty tiers should fall back to flat; got %v, want 5.0", got)
+	}
+}
+
+func TestThresholdLevels(t *testing.T) {
+	if len(ThresholdLevels) != 4 {
+		t.Fatalf("expected 4 threshold levels, got %d", len(ThresholdLevels))
+	}
+	for i, want := range []float64{50, 70, 90, 100} {
+		if ThresholdLevels[i] != want {
+			t.Errorf("ThresholdLevels[%d] = %v, want %v", i, ThresholdLevels[i], want)
+		}
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func TestBuildRateIndex(t *testing.T) {
+	rates := []inventory.RateRecord{
+		{ID: 1, TenantID: nil, ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.01)},
+		{ID: 2, TenantID: strPtr("tenant-acme"), ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.02)},
+		{ID: 3, TenantID: nil, ResourceType: "model", MeterName: "maas_tokens_in", PricePerUnit: d(0.001)},
+		{ID: 4, TenantID: strPtr(""), ResourceType: "cluster", MeterName: "cluster_uptime_seconds", PricePerUnit: d(0.50)},
+	}
+
+	idx := buildRateIndex(rates)
+
+	if len(idx) != 4 {
+		t.Fatalf("expected 4 entries in rate index, got %d", len(idx))
+	}
+
+	// Global rate (nil tenant → "")
+	r := idx[rateKey{tenant: "", instanceType: "", resourceType: "compute_instance", meterName: "vm_uptime_seconds"}]
+	if r == nil || r.ID != 1 {
+		t.Error("expected global VM rate (ID=1)")
+	}
+
+	// Tenant-specific rate
+	r = idx[rateKey{tenant: "tenant-acme", instanceType: "", resourceType: "compute_instance", meterName: "vm_uptime_seconds"}]
+	if r == nil || r.ID != 2 {
+		t.Error("expected tenant-acme VM rate (ID=2)")
+	}
+}
+
+func TestMatchRate_TenantSpecificTakesPrecedence(t *testing.T) {
+	rates := []inventory.RateRecord{
+		{ID: 1, TenantID: nil, ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.01)},
+		{ID: 2, TenantID: strPtr("tenant-acme"), ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.02)},
+	}
+	idx := buildRateIndex(rates)
+
+	r := matchRate(idx, "tenant-acme", "", "compute_instance", "vm_uptime_seconds")
+	if r == nil || r.ID != 2 {
+		t.Errorf("expected tenant-specific rate (ID=2), got %+v", r)
+	}
+}
+
+func TestMatchRate_FallsBackToGlobal(t *testing.T) {
+	rates := []inventory.RateRecord{
+		{ID: 1, TenantID: nil, ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.01)},
+	}
+	idx := buildRateIndex(rates)
+
+	r := matchRate(idx, "tenant-unknown", "", "compute_instance", "vm_uptime_seconds")
+	if r == nil || r.ID != 1 {
+		t.Errorf("expected global fallback rate (ID=1), got %+v", r)
+	}
+}
+
+func TestMatchRate_ReturnsNilWhenNoMatch(t *testing.T) {
+	rates := []inventory.RateRecord{
+		{ID: 1, TenantID: nil, ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.01)},
+	}
+	idx := buildRateIndex(rates)
+
+	r := matchRate(idx, "any", "", "gpu_instance", "gpu_compute_seconds")
+	if r != nil {
+		t.Errorf("expected nil for unmatched meter, got %+v", r)
+	}
+}
+
+func TestMatchRate_EmptyStringTenantIsSameAsGlobal(t *testing.T) {
+	rates := []inventory.RateRecord{
+		{ID: 1, TenantID: strPtr(""), ResourceType: "model", MeterName: "maas_tokens_in", PricePerUnit: d(0.001)},
+	}
+	idx := buildRateIndex(rates)
+
+	r := matchRate(idx, "any-tenant", "", "model", "maas_tokens_in")
+	if r == nil || r.ID != 1 {
+		t.Errorf("expected empty-string tenant to serve as global, got %+v", r)
+	}
+}
+
+func TestBuildRateIndex_FirstEntryWins(t *testing.T) {
+	rates := []inventory.RateRecord{
+		{ID: 1, TenantID: nil, ResourceType: "model", MeterName: "maas_tokens_in", PricePerUnit: d(0.001)},
+		{ID: 2, TenantID: nil, ResourceType: "model", MeterName: "maas_tokens_in", PricePerUnit: d(0.999)},
+	}
+	idx := buildRateIndex(rates)
+
+	r := idx[rateKey{tenant: "", instanceType: "", resourceType: "model", meterName: "maas_tokens_in"}]
+	if r == nil || r.ID != 1 {
+		t.Errorf("expected first rate to win (ID=1), got %+v", r)
+	}
+}
+
+func TestApplyRateCumulative_ZeroPriorMatchesPerEvent(t *testing.T) {
+	rate := inventory.RateRecord{
+		Tiers: []inventory.Tier{
+			{UpTo: ptr(100), PricePerUnit: d(0.10)},
+			{UpTo: nil, PricePerUnit: d(0.05)},
+		},
+	}
+	perEvent := ApplyRate(50, rate)
+	cumulative := ApplyRateCumulative(50, 0, rate)
+	if !perEvent.Equal(cumulative) {
+		t.Errorf("with zero prior, cumulative should match per-event: got %v vs %v", cumulative, perEvent)
+	}
+}
+
+func TestApplyRateCumulative_PriorInFreeTier(t *testing.T) {
+	rate := inventory.RateRecord{
+		Tiers: []inventory.Tier{
+			{UpTo: ptr(20), PricePerUnit: decimal.Zero},
+			{UpTo: ptr(120), PricePerUnit: d(0.08)},
+			{UpTo: nil, PricePerUnit: d(0.07)},
+		},
+	}
+	// Prior usage = 10 (in free tier), delta = 0.07 (still in free tier)
+	cost := ApplyRateCumulative(0.07, 10, rate)
+	if !cost.IsZero() {
+		t.Errorf("should be free: got %v", cost)
+	}
+}
+
+func TestApplyRateCumulative_CrossesFreeTierBoundary(t *testing.T) {
+	rate := inventory.RateRecord{
+		Tiers: []inventory.Tier{
+			{UpTo: ptr(20), PricePerUnit: decimal.Zero},
+			{UpTo: ptr(120), PricePerUnit: d(0.08)},
+			{UpTo: nil, PricePerUnit: d(0.07)},
+		},
+	}
+	// Prior = 19.95, delta = 0.07 → crosses 20 boundary
+	// 0.05 free + 0.02 at $0.08 = $0.0016
+	cost := ApplyRateCumulative(0.07, 19.95, rate)
+	if !cost.Sub(d(0.02 * 0.08)).Abs().LessThan(d(0.000000001)) {
+		t.Errorf("crossing free tier: got %v, want %v", cost, 0.02*0.08)
+	}
+}
+
+func TestApplyRateCumulative_FullMonthWorkedExample(t *testing.T) {
+	rate := inventory.RateRecord{
+		Tiers: []inventory.Tier{
+			{UpTo: ptr(20), PricePerUnit: decimal.Zero},
+			{UpTo: ptr(120), PricePerUnit: d(0.08)},
+			{UpTo: nil, PricePerUnit: d(0.07)},
+		},
+	}
+	// Verify the total cost for exactly 200 GiB accumulated:
+	// first 20 free, next 100 at 0.08 ($8), next 80 at 0.07 ($5.60) = $13.60
+	totalCost := ApplyRateCumulative(200, 0, rate)
+	if !totalCost.Sub(d(13.60)).Abs().LessThan(d(0.000000001)) {
+		t.Errorf("full month: got %v, want 13.60", totalCost)
+	}
+
+	// Also verify incremental accumulation produces the same result
+	// (within float64 tolerance from ~2857 additions of 0.07)
+	incrementalCost := decimal.Zero
+	prior := 0.0
+	delta := 0.07
+	for i := 0; i < 2857; i++ {
+		c := ApplyRateCumulative(delta, prior, rate)
+		incrementalCost = incrementalCost.Add(c)
+		prior += delta
+	}
+	remaining := 200.0 - prior
+	if remaining > 0 {
+		incrementalCost = incrementalCost.Add(ApplyRateCumulative(remaining, prior, rate))
+	}
+	if incrementalCost.Sub(d(13.60)).Abs().GreaterThan(d(0.10)) {
+		t.Errorf("incremental accumulation drift too large: got %v, want ~13.60", incrementalCost)
+	}
+}
+
+func TestApplyRateCumulative_PriorInFinalTier(t *testing.T) {
+	rate := inventory.RateRecord{
+		Tiers: []inventory.Tier{
+			{UpTo: ptr(100), PricePerUnit: d(0.10)},
+			{UpTo: nil, PricePerUnit: d(0.05)},
+		},
+	}
+	// Prior = 150 (in final tier), delta = 10
+	cost := ApplyRateCumulative(10, 150, rate)
+	if !cost.Equal(d(10 * 0.05)) {
+		t.Errorf("final tier: got %v, want %v", cost, 10*0.05)
+	}
+}
+
+func TestApplyRateCumulative_FlatRateIgnoresPrior(t *testing.T) {
+	rate := inventory.RateRecord{PricePerUnit: d(0.01)}
+	cost := ApplyRateCumulative(100, 5000, rate)
+	if !cost.Equal(d(1.0)) {
+		t.Errorf("flat rate should ignore prior: got %v, want 1.0", cost)
+	}
+}
+
+func TestMatchRate_InstanceTypeSpecificTakesPrecedence(t *testing.T) {
+	rates := []inventory.RateRecord{
+		{ID: 1, TenantID: nil, InstanceType: "", ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.01)},
+		{ID: 2, TenantID: nil, InstanceType: "m5.xlarge", ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.50)},
+	}
+	idx := buildRateIndex(rates)
+
+	r := matchRate(idx, "any-tenant", "m5.xlarge", "compute_instance", "vm_uptime_seconds")
+	if r == nil || r.ID != 2 {
+		t.Errorf("expected instance-type-specific rate (ID=2), got %+v", r)
+	}
+}
+
+func TestMatchRate_FallsBackToGlobalWhenInstanceTypeNotFound(t *testing.T) {
+	rates := []inventory.RateRecord{
+		{ID: 1, TenantID: nil, InstanceType: "", ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.01)},
+		{ID: 2, TenantID: nil, InstanceType: "m5.xlarge", ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.50)},
+	}
+	idx := buildRateIndex(rates)
+
+	r := matchRate(idx, "any-tenant", "c5.large", "compute_instance", "vm_uptime_seconds")
+	if r == nil || r.ID != 1 {
+		t.Errorf("expected global fallback (ID=1) for unknown instance type, got %+v", r)
+	}
+}
+
+func TestMatchRate_TenantAndInstanceTypeCombined(t *testing.T) {
+	rates := []inventory.RateRecord{
+		{ID: 1, TenantID: nil, InstanceType: "", ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.01)},
+		{ID: 2, TenantID: nil, InstanceType: "m5.xlarge", ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.50)},
+		{ID: 3, TenantID: strPtr("vip-tenant"), InstanceType: "m5.xlarge", ResourceType: "compute_instance", MeterName: "vm_uptime_seconds", PricePerUnit: d(0.30)},
+	}
+	idx := buildRateIndex(rates)
+
+	// VIP tenant with m5.xlarge gets the tenant+instance_type rate
+	r := matchRate(idx, "vip-tenant", "m5.xlarge", "compute_instance", "vm_uptime_seconds")
+	if r == nil || r.ID != 3 {
+		t.Errorf("expected tenant+instance_type rate (ID=3), got %+v", r)
+	}
+
+	// Regular tenant with m5.xlarge gets the global instance_type rate
+	r = matchRate(idx, "other-tenant", "m5.xlarge", "compute_instance", "vm_uptime_seconds")
+	if r == nil || r.ID != 2 {
+		t.Errorf("expected global instance_type rate (ID=2), got %+v", r)
+	}
+
+	// VIP tenant with unknown instance type gets global default
+	r = matchRate(idx, "vip-tenant", "c5.large", "compute_instance", "vm_uptime_seconds")
+	if r == nil || r.ID != 1 {
+		t.Errorf("expected global default (ID=1) for unknown instance type, got %+v", r)
+	}
+}

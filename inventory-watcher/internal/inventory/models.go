@@ -1,0 +1,301 @@
+package inventory
+
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/shopspring/decimal"
+)
+
+type ProjectRecord struct {
+	ProjectID   string          `json:"project_id"`
+	Name        string          `json:"name"`
+	Tenant      string          `json:"tenant"`
+	Labels      json.RawMessage `json:"labels"`
+	CreatedAt   time.Time       `json:"created_at"`
+	DeletedAt   *time.Time      `json:"deleted_at"`
+	LastUpdated time.Time       `json:"last_updated"`
+}
+
+type TenantRecord struct {
+	TenantID    string          `json:"tenant_id"`
+	Name        string          `json:"name"`
+	Labels      json.RawMessage `json:"labels"`
+	CreatedAt   time.Time       `json:"created_at"`
+	DeletedAt   *time.Time      `json:"deleted_at"`
+	LastUpdated time.Time       `json:"last_updated"`
+}
+
+type ComputeInstanceRecord struct {
+	InstanceID    string          `json:"instance_id"`
+	Name          string          `json:"name"`
+	Tenant        string          `json:"tenant"`
+	Project       string          `json:"project"`
+	ClusterID     string          `json:"cluster_id"`
+	InstanceType  string          `json:"instance_type"`
+	Cores         int32           `json:"cores"`
+	MemoryGiB     int32           `json:"memory_gib"`
+	State         string          `json:"state"`
+	Labels        json.RawMessage `json:"labels"`
+	CreatedAt     time.Time       `json:"created_at"`
+	DeletedAt     *time.Time      `json:"deleted_at"`
+	LastEventID   string          `json:"last_event_id"`
+	LastUpdated   time.Time       `json:"last_updated"`
+	LastMeteredAt *time.Time      `json:"last_metered_at"`
+}
+
+type ClusterRecord struct {
+	ClusterID     string          `json:"cluster_id"`
+	Name          string          `json:"name"`
+	Tenant        string          `json:"tenant"`
+	Template      string          `json:"template"`
+	NodeSetsJSON  json.RawMessage `json:"node_sets"`
+	State         string          `json:"state"`
+	Labels        json.RawMessage `json:"labels"`
+	CreatedAt     time.Time       `json:"created_at"`
+	DeletedAt     *time.Time      `json:"deleted_at"`
+	LastEventID   string          `json:"last_event_id"`
+	LastUpdated   time.Time       `json:"last_updated"`
+	LastMeteredAt *time.Time      `json:"last_metered_at"`
+}
+
+type ModelRecord struct {
+	ModelID     string          `json:"model_id"`
+	Name        string          `json:"name"`
+	ModelName   string          `json:"model_name"`
+	Tenant      string          `json:"tenant"`
+	Project     string          `json:"project"`
+	Template    string          `json:"template"`
+	State       string          `json:"state"`
+	Labels      json.RawMessage `json:"labels"`
+	CreatedAt   time.Time       `json:"created_at"`
+	DeletedAt   *time.Time      `json:"deleted_at"`
+	LastEventID string          `json:"last_event_id"`
+	LastUpdated time.Time       `json:"last_updated"`
+}
+
+type BareMetalInstanceRecord struct {
+	InstanceID    string          `json:"instance_id"`
+	Name          string          `json:"name"`
+	Tenant        string          `json:"tenant"`
+	CatalogItem   string          `json:"catalog_item"`
+	State         string          `json:"state"`
+	Labels        json.RawMessage `json:"labels"`
+	CreatedAt     time.Time       `json:"created_at"`
+	DeletedAt     *time.Time      `json:"deleted_at"`
+	LastEventID   string          `json:"last_event_id"`
+	LastUpdated   time.Time       `json:"last_updated"`
+	LastMeteredAt *time.Time      `json:"last_metered_at"`
+}
+
+type CatalogItemRecord struct {
+	CatalogItemID string    `json:"catalog_item_id"`
+	ItemType      string    `json:"item_type"`
+	Name          string    `json:"name"`
+	Title         string    `json:"title"`
+	Description   string    `json:"description"`
+	Template      string    `json:"template"`
+	Published     bool      `json:"published"`
+	Tenant        string    `json:"tenant"`
+	LastUpdated   time.Time `json:"last_updated"`
+}
+
+type InstanceTypeRecord struct {
+	InstanceTypeID string    `json:"instance_type_id"`
+	Name           string    `json:"name"`
+	Cores          int32     `json:"cores"`
+	MemoryGiB      int32     `json:"memory_gib"`
+	State          string    `json:"state"`
+	LastUpdated    time.Time `json:"last_updated"`
+}
+
+type RawEvent struct {
+	ID           string          `json:"id"`
+	EventID      string          `json:"event_id"`
+	EventType    string          `json:"event_type"`
+	EventSource  string          `json:"event_source"`
+	EventTime    time.Time       `json:"event_time"`
+	TenantID     string          `json:"tenant_id"`
+	ResourceType string          `json:"resource_type"`
+	ResourceID   string          `json:"resource_id"`
+	Data         json.RawMessage `json:"data"`
+	ReceivedAt   time.Time       `json:"received_at"`
+}
+
+type MeteringEntry struct {
+	ID           int64     `json:"id"`
+	RawEventID   *int64    `json:"raw_event_id"`
+	ResourceType string    `json:"resource_type"`
+	ResourceID   string    `json:"resource_id"`
+	TenantID     string    `json:"tenant_id"`
+	ProjectID    string    `json:"project_id"`
+	UserID       string    `json:"user_id"`
+	InstanceType string    `json:"instance_type"`
+	MeterName    string    `json:"meter_name"`
+	Value        float64   `json:"value"`
+	Unit         string    `json:"unit"`
+	PeriodStart  time.Time `json:"period_start"`
+	PeriodEnd    time.Time `json:"period_end"`
+}
+
+type Tier struct {
+	UpTo         *float64        `json:"up_to"`
+	PricePerUnit decimal.Decimal `json:"price_per_unit"`
+}
+
+type RateRecord struct {
+	ID            int64      `json:"id"`
+	TenantID      *string    `json:"tenant_id"`
+	ResourceType  string     `json:"resource_type"`
+	InstanceType  string     `json:"instance_type"`
+	MeterName     string     `json:"meter_name"`
+	KokuMetric    string     `json:"koku_metric"`
+	CostType      string     `json:"cost_type"`
+	PricePerUnit  decimal.Decimal `json:"price_per_unit"`
+	Currency      string         `json:"currency"`
+	Tiers         []Tier         `json:"tiers"`
+	TierMode      string         `json:"tier_mode"`
+	TierPeriod    string     `json:"tier_period"`
+	Description   string     `json:"description"`
+	EffectiveFrom time.Time  `json:"effective_from"`
+	EffectiveTo   *time.Time `json:"effective_to"`
+}
+
+type CostEntry struct {
+	ID              int64     `json:"id"`
+	MeteringEntryID int64     `json:"metering_entry_id"`
+	RateID          int64     `json:"rate_id"`
+	TenantID        string    `json:"tenant_id"`
+	ProjectID       string    `json:"project_id"`
+	UserID          string    `json:"user_id"`
+	ResourceType    string    `json:"resource_type"`
+	ResourceID      string    `json:"resource_id"`
+	MeterName       string    `json:"meter_name"`
+	MeteredValue    float64         `json:"metered_value"`
+	CostAmount      decimal.Decimal `json:"cost_amount"`
+	Currency        string    `json:"currency"`
+	PeriodStart     time.Time `json:"period_start"`
+	PeriodEnd       time.Time `json:"period_end"`
+	WalletApplied   decimal.Decimal `json:"wallet_applied"`
+}
+
+type QuotaRecord struct {
+	ID            int64      `json:"id"`
+	Name          string     `json:"name"`
+	TenantID      string     `json:"tenant_id"`
+	ProjectID     string     `json:"project_id"`
+	ResourceType  string     `json:"resource_type"`
+	MeterName     string     `json:"meter_name"`
+	LimitValue    float64    `json:"limit_value"`
+	Unit          string     `json:"unit"`
+	Period        string     `json:"period"`
+	Policy        string     `json:"policy"`
+	Thresholds    []float64  `json:"thresholds,omitempty"`
+	EffectiveFrom time.Time  `json:"effective_from"`
+	EffectiveTo   *time.Time `json:"effective_to"`
+}
+
+type QuotaStatus struct {
+	MeterName  string             `json:"meter_name"`
+	Unit       string             `json:"unit"`
+	Limit      float64            `json:"limit"`
+	Consumed   float64            `json:"consumed"`
+	Percentage float64            `json:"percentage"`
+	Thresholds map[string]bool    `json:"thresholds"`
+	Alerts     []AlertRecord      `json:"alerts,omitempty"`
+}
+
+type AlertRecord struct {
+	ID           int64     `json:"id"`
+	TenantID     string    `json:"tenant_id"`
+	MeterName    string    `json:"meter_name"`
+	ThresholdPct float64   `json:"threshold_pct"`
+	Consumed     float64   `json:"consumed"`
+	LimitValue   float64   `json:"limit_value"`
+	Period       string    `json:"period"`
+	State        string    `json:"state"`
+	FiredAt      time.Time `json:"fired_at"`
+}
+
+type CostReportRow struct {
+	Date               string  `json:"date,omitempty"`
+	Group              string  `json:"group"`
+	Entries            int     `json:"entries"`
+	Cost               float64 `json:"cost"`
+	InfrastructureCost float64 `json:"infrastructure_cost"`
+	SupplementaryCost  float64 `json:"supplementary_cost"`
+	Currency           string  `json:"currency"`
+}
+
+type CostBreakdownRow struct {
+	Date         string  `json:"date"`
+	TenantID     string  `json:"tenant_id"`
+	ProjectID    string  `json:"project_id"`
+	UserID       string  `json:"user_id"`
+	ResourceType string  `json:"resource_type"`
+	ResourceID   string  `json:"resource_id"`
+	MeterName    string  `json:"meter_name"`
+	MeteredValue float64 `json:"metered_value"`
+	CostAmount   float64 `json:"cost_amount"`
+	CostType     string  `json:"cost_type"`
+	Currency     string  `json:"currency"`
+}
+
+type WalletRecord struct {
+	ID               string          `json:"id"`
+	TenantID         string          `json:"tenant_id"`
+	ProjectID        string          `json:"project_id"`
+	Currency         string          `json:"currency"`
+	Balance          decimal.Decimal `json:"balance"`
+	BalanceFloor     decimal.Decimal `json:"balance_floor"`
+	ReferenceBalance decimal.Decimal `json:"reference_balance"`
+	LifecycleState   string          `json:"lifecycle_state"`
+	Thresholds       []float64       `json:"thresholds,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+}
+
+type WalletLedgerEntry struct {
+	ID           int64           `json:"id"`
+	WalletID     string          `json:"wallet_id"`
+	EntryType    string          `json:"entry_type"`
+	Amount       decimal.Decimal `json:"amount"`
+	BalanceAfter decimal.Decimal `json:"balance_after"`
+	Currency     string          `json:"currency"`
+	CostEntryID  *int64          `json:"cost_entry_id,omitempty"`
+	ExternalRef  string          `json:"external_ref,omitempty"`
+	Reason       string          `json:"reason,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+}
+
+type WalletStatus struct {
+	WalletID         string          `json:"wallet_id"`
+	TenantID         string          `json:"tenant_id"`
+	Currency         string          `json:"currency"`
+	Balance          decimal.Decimal `json:"balance"`
+	ReferenceBalance decimal.Decimal `json:"reference_balance"`
+	RemainingPct     float64         `json:"remaining_pct"`
+	BalanceFloor     decimal.Decimal `json:"balance_floor"`
+	BalanceStatus    string          `json:"balance_status"`
+	WithinBalance    bool            `json:"within_balance"`
+	Thresholds       map[string]bool `json:"thresholds"`
+}
+
+type PricingRule struct {
+	ID        int64           `json:"id"`
+	Name      string          `json:"name"`
+	RuleJSON  json.RawMessage `json:"rule_json"`
+	Version   int             `json:"version"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+}
+
+type PipelineSummary struct {
+	RawEvents       int `json:"raw_events"`
+	MeteringEntries int `json:"metering_entries"`
+	CostEntries     int `json:"cost_entries"`
+	Rates           int `json:"rates"`
+	LiveVMs         int `json:"live_vms"`
+	LiveClusters    int `json:"live_clusters"`
+	LiveModels      int `json:"live_models"`
+}
