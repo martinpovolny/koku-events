@@ -550,7 +550,7 @@ func (s *Store) BillableComputeInstances(ctx context.Context) ([]ComputeInstance
 		SELECT instance_id, name, tenant, project, cluster_id, instance_type, cores, memory_gib, state, labels,
 		       created_at, deleted_at, last_event_id, last_updated, last_metered_at
 		FROM inventory_compute_instance
-		WHERE deleted_at IS NULL AND state = 'COMPUTE_INSTANCE_STATE_RUNNING'
+		WHERE deleted_at IS NULL AND state IN ('COMPUTE_INSTANCE_STATE_RUNNING', 'RUNNING')
 	`)
 	if err != nil {
 		return nil, err
@@ -600,7 +600,7 @@ func (s *Store) BillableClusters(ctx context.Context) ([]ClusterRecord, error) {
 		SELECT cluster_id, name, tenant, template, node_sets, state, labels,
 		       created_at, deleted_at, last_event_id, last_updated, last_metered_at
 		FROM inventory_cluster
-		WHERE deleted_at IS NULL AND state IN ('CLUSTER_STATE_READY', 'CLUSTER_STATE_PROGRESSING')
+		WHERE deleted_at IS NULL AND state IN ('CLUSTER_STATE_READY', 'CLUSTER_STATE_PROGRESSING', 'READY', 'PROGRESSING')
 	`)
 	if err != nil {
 		return nil, err
@@ -722,7 +722,7 @@ func (s *Store) BillableBareMetalInstances(ctx context.Context) ([]BareMetalInst
 		SELECT instance_id, name, tenant, catalog_item, state, labels,
 		       created_at, deleted_at, last_event_id, last_updated, last_metered_at
 		FROM inventory_bare_metal_instance
-		WHERE deleted_at IS NULL AND state = 'BARE_METAL_INSTANCE_STATE_RUNNING'
+		WHERE deleted_at IS NULL AND state IN ('BARE_METAL_INSTANCE_STATE_RUNNING', 'RUNNING')
 	`)
 	if err != nil {
 		return nil, err
@@ -1073,6 +1073,30 @@ func (s *Store) UpsertCatalogItem(ctx context.Context, rec CatalogItemRecord) er
 	return nil
 }
 
+// ListAllCatalogItems returns all catalog items ordered by item_type and name.
+func (s *Store) ListAllCatalogItems(ctx context.Context) ([]CatalogItemRecord, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT catalog_item_id, item_type, name, title, description, template, published, tenant, last_updated
+		FROM inventory_catalog_item
+		ORDER BY item_type, name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []CatalogItemRecord
+	for rows.Next() {
+		var r CatalogItemRecord
+		if err := rows.Scan(&r.CatalogItemID, &r.ItemType, &r.Name, &r.Title, &r.Description,
+			&r.Template, &r.Published, &r.Tenant, &r.LastUpdated); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
 // ListAliveComputeInstances returns all compute instances not yet deleted.
 func (s *Store) ListAliveComputeInstances(ctx context.Context) ([]ComputeInstanceRecord, error) {
 	rows, err := s.db.Query(ctx, `
@@ -1122,8 +1146,14 @@ func (s *Store) ListAliveClusters(ctx context.Context) ([]ClusterRecord, error) 
 	return results, rows.Err()
 }
 
-// UpsertRate inserts or updates a rate definition.
+// UpsertRate inserts a rate definition. If an active rate exists with the identical
+// matching dimensions (tenant_id, resource_type, instance_type, meter_name), it retires
+// the older active rate by setting its effective_to to the new rate's effective_from (or NOW).
 func (s *Store) UpsertRate(ctx context.Context, rec RateRecord) (int64, error) {
+	if rec.EffectiveFrom.IsZero() {
+		rec.EffectiveFrom = time.Now().UTC()
+	}
+
 	var tiersJSON []byte
 	if rec.Tiers != nil {
 		var err error
@@ -1133,23 +1163,86 @@ func (s *Store) UpsertRate(ctx context.Context, rec RateRecord) (int64, error) {
 		}
 	}
 
+	// Retire any currently active matching rate so the new rate cleanly takes over.
+	var retireQuery string
+	var retireArgs []any
+	if rec.TenantID != nil && *rec.TenantID != "" {
+		retireQuery = `
+			UPDATE rates
+			SET effective_to = $1
+			WHERE resource_type = $2 AND meter_name = $3 AND instance_type = $4
+			  AND tenant_id = $5
+			  AND (effective_to IS NULL OR effective_to > $1)
+		`
+		retireArgs = []any{rec.EffectiveFrom, rec.ResourceType, rec.MeterName, rec.InstanceType, *rec.TenantID}
+	} else {
+		retireQuery = `
+			UPDATE rates
+			SET effective_to = $1
+			WHERE resource_type = $2 AND meter_name = $3 AND instance_type = $4
+			  AND (tenant_id IS NULL OR tenant_id = '')
+			  AND (effective_to IS NULL OR effective_to > $1)
+		`
+		retireArgs = []any{rec.EffectiveFrom, rec.ResourceType, rec.MeterName, rec.InstanceType}
+	}
+	_, _ = s.db.Exec(ctx, retireQuery, retireArgs...)
+
 	var id int64
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO rates
 			(tenant_id, resource_type, instance_type, meter_name, koku_metric, cost_type, price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-		ON CONFLICT DO NOTHING
 		RETURNING id
 	`, rec.TenantID, rec.ResourceType, rec.InstanceType, rec.MeterName, rec.KokuMetric, rec.CostType,
 		rec.PricePerUnit, rec.Currency, tiersJSON, rec.TierMode, rec.TierPeriod, rec.Description,
 		rec.EffectiveFrom, rec.EffectiveTo).Scan(&id)
 
 	if err != nil {
-		// ON CONFLICT DO NOTHING means no row returned if it already exists.
-		// That's fine — return 0 to indicate no insert.
-		return 0, nil
+		return 0, err
 	}
 	return id, nil
+}
+
+// GetRate returns a single rate by ID.
+func (s *Store) GetRate(ctx context.Context, id int64) (*RateRecord, error) {
+	var rec RateRecord
+	var tiersJSON []byte
+
+	err := s.db.QueryRow(ctx, `
+		SELECT id, tenant_id, resource_type, instance_type, meter_name, koku_metric, cost_type,
+		       price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to
+		FROM rates
+		WHERE id = $1
+	`, id).Scan(
+		&rec.ID, &rec.TenantID, &rec.ResourceType, &rec.InstanceType, &rec.MeterName,
+		&rec.KokuMetric, &rec.CostType,
+		&rec.PricePerUnit, &rec.Currency, &tiersJSON, &rec.TierMode, &rec.TierPeriod, &rec.Description,
+		&rec.EffectiveFrom, &rec.EffectiveTo)
+	if err != nil {
+		return nil, err
+	}
+
+	if tiersJSON != nil {
+		if err := json.Unmarshal(tiersJSON, &rec.Tiers); err != nil {
+			return nil, fmt.Errorf("unmarshal tiers for rate %d: %w", rec.ID, err)
+		}
+	}
+
+	return &rec, nil
+}
+
+// DeleteRate soft-deletes a rate by setting its effective_to to NOW().
+// Returns true if a rate was found and updated, false if not found.
+func (s *Store) DeleteRate(ctx context.Context, id int64) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE rates
+		SET effective_to = NOW()
+		WHERE id = $1 AND (effective_to IS NULL OR effective_to > NOW())
+	`, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // FindRate looks up the applicable rate for a meter. Prefers tenant-specific

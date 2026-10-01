@@ -903,6 +903,40 @@ func (h *APIHandler) processOSACInference(ctx context.Context, ce cloudEventInte
 }
 
 // ---------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------
+
+// GetCatalog implements ServerInterface.
+func (h *APIHandler) GetCatalog(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	catalogItems, err := h.store.ListAllCatalogItems(r.Context())
+	if err != nil {
+		h.logger.Error("list catalog items failed", "error", err)
+		writeErrorJSON(w, "failed to list catalog items", http.StatusInternalServerError)
+		return
+	}
+	if catalogItems == nil {
+		catalogItems = []inventory.CatalogItemRecord{}
+	}
+
+	instanceTypes, err := h.store.ListAllInstanceTypes(r.Context())
+	if err != nil {
+		h.logger.Error("list instance types failed", "error", err)
+		writeErrorJSON(w, "failed to list instance types", http.StatusInternalServerError)
+		return
+	}
+	if instanceTypes == nil {
+		instanceTypes = []inventory.InstanceTypeRecord{}
+	}
+
+	writeJSON(w, map[string]any{
+		"catalog_items":  catalogItems,
+		"instance_types": instanceTypes,
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Rates
 // ---------------------------------------------------------------------------
 
@@ -961,6 +995,133 @@ func (h *APIHandler) ListRates(w http.ResponseWriter, r *http.Request, params Li
 	}
 
 	writeJSON(w, map[string]any{"rates": rates, "count": len(rates)})
+}
+
+// CreateRate implements ServerInterface.
+func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+
+	var req CreateRateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorJSON(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.ResourceType == "" || req.MeterName == "" {
+		writeErrorJSON(w, "resource_type and meter_name are required", http.StatusBadRequest)
+		return
+	}
+
+	price, err := decimal.NewFromString(req.PricePerUnit)
+	if err != nil {
+		writeErrorJSON(w, "invalid price_per_unit decimal value", http.StatusBadRequest)
+		return
+	}
+	if price.IsNegative() {
+		writeErrorJSON(w, "price_per_unit must be non-negative", http.StatusBadRequest)
+		return
+	}
+
+	currency := "USD"
+	if req.Currency != nil && *req.Currency != "" {
+		currency = *req.Currency
+	}
+	costType := "Infrastructure"
+	if req.CostType != nil && *req.CostType != "" {
+		costType = *req.CostType
+	}
+	tierMode := "per_event"
+	if req.TierMode != nil && *req.TierMode != "" {
+		tierMode = *req.TierMode
+	}
+	instanceType := ""
+	if req.InstanceType != nil {
+		instanceType = *req.InstanceType
+	}
+	kokuMetric := ""
+	if req.KokuMetric != nil {
+		kokuMetric = *req.KokuMetric
+	}
+	description := ""
+	if req.Description != nil {
+		description = *req.Description
+	}
+	tierPeriod := ""
+	if req.TierPeriod != nil {
+		tierPeriod = *req.TierPeriod
+	}
+
+	effectiveFrom := time.Now().UTC()
+	if req.EffectiveFrom != nil && !req.EffectiveFrom.IsZero() {
+		effectiveFrom = *req.EffectiveFrom
+	}
+
+	var tiers []inventory.Tier
+	if req.Tiers != nil {
+		for _, t := range *req.Tiers {
+			tp, err := decimal.NewFromString(t.PricePerUnit)
+			if err != nil {
+				writeErrorJSON(w, "invalid tier price_per_unit", http.StatusBadRequest)
+				return
+			}
+			tiers = append(tiers, inventory.Tier{
+				UpTo:         t.UpTo,
+				PricePerUnit: tp,
+			})
+		}
+	}
+
+	var tenantID *string
+	if req.TenantId != nil && *req.TenantId != "" {
+		tenantID = req.TenantId
+	}
+
+	rateRec := inventory.RateRecord{
+		TenantID:      tenantID,
+		ResourceType:  req.ResourceType,
+		InstanceType:  instanceType,
+		MeterName:     req.MeterName,
+		KokuMetric:    kokuMetric,
+		CostType:      costType,
+		PricePerUnit:  price,
+		Currency:      currency,
+		Tiers:         tiers,
+		TierMode:      tierMode,
+		TierPeriod:    tierPeriod,
+		Description:   description,
+		EffectiveFrom: effectiveFrom,
+		EffectiveTo:   req.EffectiveTo,
+	}
+
+	id, err := h.store.UpsertRate(r.Context(), rateRec)
+	if err != nil {
+		h.logger.Error("create rate failed", "error", err)
+		writeErrorJSON(w, "failed to create rate", http.StatusInternalServerError)
+		return
+	}
+	rateRec.ID = id
+
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, rateRec)
+}
+
+// DeleteRate implements ServerInterface.
+func (h *APIHandler) DeleteRate(w http.ResponseWriter, r *http.Request, id int64) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	found, err := h.store.DeleteRate(r.Context(), id)
+	if err != nil {
+		h.logger.Error("delete rate failed", "id", id, "error", err)
+		writeErrorJSON(w, "failed to delete rate", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		writeErrorJSON(w, "rate not found or already retired", http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---------------------------------------------------------------------------
@@ -1854,6 +2015,12 @@ func (h *APIHandler) GetReports(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) GetDebugDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(dashboardHTML))
+}
+
+// GetRatesUI serves the catalog and rate management prototype UI (HTML).
+func (h *APIHandler) GetRatesUI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(ratesHTML))
 }
 
 // RegisterDebugRoutes adds GET / (redirect to /reports).

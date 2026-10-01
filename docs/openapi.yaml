@@ -50,8 +50,10 @@ tags:
     description: Liveness and readiness probes (exempt from JWT authentication)
   - name: Events
     description: CloudEvents ingestion — stores immutably then processes into inventory and metering
+  - name: Catalog
+    description: Catalog items and machine instance types for rate assignment
   - name: Rates
-    description: Rate card listing with JSON and CSV export
+    description: Rate card listing and management with JSON and CSV export
   - name: Quotas
     description: Quota and budget management with real-time consumption tracking
   - name: Wallets
@@ -265,6 +267,29 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  # ── Catalog ─────────────────────────────────────────────────────────────
+  /api/v1/catalog:
+    get:
+      operationId: getCatalog
+      tags: [Catalog]
+      summary: List catalog offerings and machine instance types
+      description: >-
+        Returns synchronized catalog items (templates, services) and
+        instance types (machine sizing) for pricing and rate assignment.
+      responses:
+        "200":
+          description: Catalog items and instance types
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogResponse"
+        "500":
+          description: Database query failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   # ── Rates ───────────────────────────────────────────────────────────────
   /api/v1/rates:
     get:
@@ -341,6 +366,71 @@ paths:
                   tiers, description, effective_from, effective_to
         "500":
           description: Database query failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: createRate
+      tags: [Rates]
+      summary: Create or update a rate definition
+      description: >-
+        Creates a new rate record for a resource type, instance type, and meter name.
+        If an active rate already exists for the matching criteria, it is retired
+        by setting its effective_to timestamp so the new rate takes effect cleanly.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRateRequest"
+      responses:
+        "201":
+          description: Rate created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateRecord"
+        "400":
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Database write failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/rates/{id}:
+    delete:
+      operationId: deleteRate
+      tags: [Rates]
+      summary: Retire / soft-delete a rate record
+      description: >-
+        Soft-deletes a rate by setting its effective_to timestamp to NOW(),
+        retiring it from active rate matching.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: Rate record ID
+      responses:
+        "204":
+          description: Rate retired successfully
+        "404":
+          description: Rate not found or already retired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Database update failed
           content:
             application/json:
               schema:
@@ -1376,6 +1466,24 @@ paths:
               schema:
                 type: string
 
+  /rates:
+    get:
+      operationId: getRatesUI
+      tags: [Operations]
+      summary: Catalog and Rate Management UI (HTML)
+      description: >-
+        Catalog and rate assignment UI rendered as a single-page HTML
+        application. Provides a prototype interface for viewing synchronized
+        machine instance types and service catalog items, inspecting assigned rates,
+        assigning new rates, and retiring rate cards.
+      responses:
+        "200":
+          description: Rates and catalog HTML UI page
+          content:
+            text/html:
+              schema:
+                type: string
+
   /debug/dashboard:
     get:
       operationId: getDebugDashboard
@@ -1724,6 +1832,108 @@ components:
           description: Interval length in milliseconds (IPP format)
           example: 1200
 
+    # ── Catalog ───────────────────────────────────────────────────────────
+    CatalogResponse:
+      type: object
+      properties:
+        catalog_items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogItemRecord"
+          description: Service catalog items and templates
+        instance_types:
+          type: array
+          items:
+            $ref: "#/components/schemas/InstanceTypeRecord"
+          description: Machine instance types and hardware sizing specifications
+      required:
+        - catalog_items
+        - instance_types
+
+    CatalogItemRecord:
+      type: object
+      properties:
+        catalog_item_id:
+          type: string
+          description: Unique catalog item ID
+          example: cat-gpu-h100
+        item_type:
+          type: string
+          description: Item type (e.g. cluster_template, compute_instance, bare_metal_instance)
+          example: compute_instance
+        name:
+          type: string
+          description: SKU or item identifier
+          example: gpu-h100-80gb
+        title:
+          type: string
+          description: Human-readable display title
+          example: NVIDIA H100 80GB PCIe GPU
+        description:
+          type: string
+          description: Catalog item description
+          example: High-performance accelerator for LLM training and inference
+        template:
+          type: string
+          description: Template identifier
+          example: template-gpu-node
+        published:
+          type: boolean
+          description: Whether the item is published in the catalog
+          example: true
+        tenant:
+          type: string
+          description: Tenant ID or scope
+          example: default
+        last_updated:
+          type: string
+          format: date-time
+          description: Timestamp of last catalog sync
+      required:
+        - catalog_item_id
+        - item_type
+        - name
+        - title
+        - published
+        - last_updated
+
+    InstanceTypeRecord:
+      type: object
+      properties:
+        instance_type_id:
+          type: string
+          description: Instance type identifier
+          example: standard-4-16
+        name:
+          type: string
+          description: Instance type name
+          example: Standard 4 vCPU 16GB
+        cores:
+          type: integer
+          format: int32
+          description: Number of CPU cores
+          example: 4
+        memory_gib:
+          type: integer
+          format: int32
+          description: Memory in GiB
+          example: 16
+        state:
+          type: string
+          description: State of instance type
+          example: active
+        last_updated:
+          type: string
+          format: date-time
+          description: Timestamp of last update
+      required:
+        - instance_type_id
+        - name
+        - cores
+        - memory_gib
+        - state
+        - last_updated
+
     # ── Rates ─────────────────────────────────────────────────────────────
     Tier:
       type: object
@@ -1829,6 +2039,80 @@ components:
           description: >-
             Rate effective end date. `null` means no expiry
             (rate is active indefinitely).
+
+    CreateRateRequest:
+      type: object
+      required:
+        - resource_type
+        - meter_name
+        - price_per_unit
+      properties:
+        tenant_id:
+          type: string
+          nullable: true
+          description: Tenant-specific override. Omit or null for global rate.
+        resource_type:
+          type: string
+          description: Resource type (e.g. compute_instance, cluster, model, bare_metal)
+          example: compute_instance
+        instance_type:
+          type: string
+          default: ""
+          description: Instance type or catalog item SKU to match (empty string matches any)
+          example: standard-4-16
+        meter_name:
+          type: string
+          description: Meter name to match (e.g. vm_uptime_seconds)
+          example: vm_uptime_seconds
+        koku_metric:
+          type: string
+          default: ""
+          description: Koku metric mapping (e.g. vm_cost_per_hour)
+          example: vm_cost_per_hour
+        cost_type:
+          type: string
+          default: Infrastructure
+          description: Koku cost layer (Infrastructure or Supplementary)
+          example: Infrastructure
+        price_per_unit:
+          type: string
+          format: decimal
+          description: Price per unit of metered value (e.g. hourly rate / 3600 for uptime)
+          example: "0.0000277778"
+        currency:
+          type: string
+          default: USD
+          description: Currency code
+          example: USD
+        tiers:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tier"
+          description: Optional tiered pricing tiers
+        tier_mode:
+          type: string
+          default: per_event
+          description: Tier calculation mode (per_event, volume, graduated)
+          example: per_event
+        tier_period:
+          type: string
+          default: ""
+          description: Period for tier accumulation (e.g. monthly)
+        description:
+          type: string
+          default: ""
+          description: Description of the rate card
+          example: Standard 4 vCPU 16GB VM rate ($0.10/hour)
+        effective_from:
+          type: string
+          format: date-time
+          nullable: true
+          description: Rate effective start timestamp (defaults to current time)
+        effective_to:
+          type: string
+          format: date-time
+          nullable: true
+          description: Rate effective end timestamp (defaults to null / open-ended)
 
     # ── Quotas ────────────────────────────────────────────────────────────
     QuotaRecord:

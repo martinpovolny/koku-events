@@ -104,3 +104,5 @@ inventory-watcher/koku-sync
 istio-*/
 .claude/
 .playwright-mcp/
+.codex/
+.serena/

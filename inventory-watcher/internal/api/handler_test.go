@@ -2370,3 +2370,245 @@ func TestIngestEventBatchMalformedMemberRollsBackAllMembers(t *testing.T) {
 		t.Fatalf("malformed batch wrote valid member: raw=%d receipts=%d", rawCount, receiptCount)
 	}
 }
+
+func TestGetRatesUI(t *testing.T) {
+	h := api.NewAPIHandler(nil, nil, nil, nil, testLogger)
+	req := httptest.NewRequest(http.MethodGet, "/rates", nil)
+	w := httptest.NewRecorder()
+	h.GetRatesUI(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") {
+		t.Errorf("expected text/html Content-Type, got %q", contentType)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "Catalog &amp; Rates") {
+		t.Errorf("expected HTML body to contain 'Catalog &amp; Rates'")
+	}
+	if !strings.Contains(bodyStr, "/api/v1/catalog") {
+		t.Errorf("expected HTML body to contain '/api/v1/catalog'")
+	}
+	if !strings.Contains(bodyStr, "/api/v1/rates") {
+		t.Errorf("expected HTML body to contain '/api/v1/rates'")
+	}
+}
+
+func TestCreateRate_Validation(t *testing.T) {
+	h := api.NewAPIHandler(nil, nil, nil, nil, testLogger)
+
+	tests := []struct {
+		name       string
+		payload    string
+		wantStatus int
+	}{
+		{
+			name:       "invalid JSON",
+			payload:    "{invalid",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing resource_type",
+			payload:    `{"meter_name":"vm_uptime_seconds","price_per_unit":"0.01"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing meter_name",
+			payload:    `{"resource_type":"compute_instance","price_per_unit":"0.01"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid decimal price",
+			payload:    `{"resource_type":"compute_instance","meter_name":"vm_uptime_seconds","price_per_unit":"invalid"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "negative price",
+			payload:    `{"resource_type":"compute_instance","meter_name":"vm_uptime_seconds","price_per_unit":"-0.05"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid tier price",
+			payload:    `{"resource_type":"compute_instance","meter_name":"vm_uptime_seconds","price_per_unit":"0.01","tiers":[{"price_per_unit":"bad"}]}`,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/rates", strings.NewReader(tc.payload))
+			w := httptest.NewRecorder()
+			h.CreateRate(w, req)
+			resp := w.Result()
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestCatalogAndRates_Database(t *testing.T) {
+	if testStore == nil {
+		t.Skip("test database not available")
+	}
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	// 1. Seed instance type and catalog item
+	instTypeID := "type-" + suffix
+	_, err := testStore.Pool().Exec(ctx, `
+		INSERT INTO inventory_instance_type (instance_type_id, name, cores, memory_gib, state, last_updated)
+		VALUES ($1, $2, 4, 16, 'active', NOW())
+		ON CONFLICT (instance_type_id) DO NOTHING
+	`, instTypeID, "inst-name-"+suffix)
+	if err != nil {
+		t.Fatalf("insert instance type: %v", err)
+	}
+
+	catItemID := "cat-" + suffix
+	err = testStore.UpsertCatalogItem(ctx, inventory.CatalogItemRecord{
+		CatalogItemID: catItemID,
+		ItemType:      "cluster_template",
+		Name:          "cat-name-" + suffix,
+		Title:         "High Performance Cluster",
+		Description:   "4-node GPU cluster",
+		Template:      "tpl-gpu",
+		Published:     true,
+		Tenant:        "default",
+	})
+	if err != nil {
+		t.Fatalf("upsert catalog item: %v", err)
+	}
+
+	// 2. Test GET /api/v1/catalog
+	catReq, _ := http.NewRequest(http.MethodGet, testServer.URL+"/api/v1/catalog", nil)
+	catResp, err := http.DefaultClient.Do(catReq)
+	if err != nil {
+		t.Fatalf("GET /api/v1/catalog: %v", err)
+	}
+	defer catResp.Body.Close()
+	if catResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/catalog status = %d, want 200", catResp.StatusCode)
+	}
+	var catData struct {
+		CatalogItems  []inventory.CatalogItemRecord  `json:"catalog_items"`
+		InstanceTypes []inventory.InstanceTypeRecord `json:"instance_types"`
+	}
+	if err := json.NewDecoder(catResp.Body).Decode(&catData); err != nil {
+		t.Fatalf("decode catalog response: %v", err)
+	}
+	var foundInst, foundCat bool
+	for _, it := range catData.InstanceTypes {
+		if it.InstanceTypeID == instTypeID {
+			foundInst = true
+			break
+		}
+	}
+	for _, ci := range catData.CatalogItems {
+		if ci.CatalogItemID == catItemID {
+			foundCat = true
+			break
+		}
+	}
+	if !foundInst {
+		t.Errorf("instance type %s not found in /api/v1/catalog", instTypeID)
+	}
+	if !foundCat {
+		t.Errorf("catalog item %s not found in /api/v1/catalog", catItemID)
+	}
+
+	// 3. Test POST /api/v1/rates (create rate)
+	sku := "sku-" + suffix
+	ratePayload := map[string]any{
+		"resource_type":  "compute_instance",
+		"instance_type":  sku,
+		"meter_name":     "vm_uptime_seconds",
+		"cost_type":      "Infrastructure",
+		"price_per_unit": "0.0000277778",
+		"currency":       "USD",
+		"description":    "Test rate",
+	}
+	bodyBytes, _ := json.Marshal(ratePayload)
+	rateReq, _ := http.NewRequest(http.MethodPost, testServer.URL+"/api/v1/rates", bytes.NewReader(bodyBytes))
+	rateReq.Header.Set("Content-Type", "application/json")
+	rateResp, err := http.DefaultClient.Do(rateReq)
+	if err != nil {
+		t.Fatalf("POST /api/v1/rates: %v", err)
+	}
+	defer rateResp.Body.Close()
+	if rateResp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(rateResp.Body)
+		t.Fatalf("POST /api/v1/rates status = %d, want 201: %s", rateResp.StatusCode, respBody)
+	}
+	var createdRate inventory.RateRecord
+	if err := json.NewDecoder(rateResp.Body).Decode(&createdRate); err != nil {
+		t.Fatalf("decode created rate: %v", err)
+	}
+	if createdRate.ID == 0 {
+		t.Fatalf("expected non-zero rate ID")
+	}
+	if createdRate.InstanceType != sku {
+		t.Errorf("instance_type = %q, want %q", createdRate.InstanceType, sku)
+	}
+
+	// 4. Test superseding rate: create a second rate for same resource_type + instance_type + meter_name
+	ratePayload2 := map[string]any{
+		"resource_type":  "compute_instance",
+		"instance_type":  sku,
+		"meter_name":     "vm_uptime_seconds",
+		"cost_type":      "Infrastructure",
+		"price_per_unit": "0.0000555556",
+		"currency":       "USD",
+		"description":    "Updated test rate",
+	}
+	bodyBytes2, _ := json.Marshal(ratePayload2)
+	rateReq2, _ := http.NewRequest(http.MethodPost, testServer.URL+"/api/v1/rates", bytes.NewReader(bodyBytes2))
+	rateReq2.Header.Set("Content-Type", "application/json")
+	rateResp2, err := http.DefaultClient.Do(rateReq2)
+	if err != nil {
+		t.Fatalf("POST /api/v1/rates (2): %v", err)
+	}
+	defer rateResp2.Body.Close()
+	if rateResp2.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /api/v1/rates (2) status = %d, want 201", rateResp2.StatusCode)
+	}
+	var createdRate2 inventory.RateRecord
+	if err := json.NewDecoder(rateResp2.Body).Decode(&createdRate2); err != nil {
+		t.Fatalf("decode second rate: %v", err)
+	}
+
+	// Verify that the first rate now has effective_to set (retired)
+	oldRate, err := testStore.GetRate(ctx, createdRate.ID)
+	if err != nil {
+		t.Fatalf("get old rate: %v", err)
+	}
+	if oldRate.EffectiveTo == nil {
+		t.Errorf("expected old rate to be retired with effective_to set, got nil")
+	}
+
+	// 5. Test DELETE /api/v1/rates/{id}
+	delReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/rates/%d", testServer.URL, createdRate2.ID), nil)
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("DELETE /api/v1/rates/{id}: %v", err)
+	}
+	defer delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE /api/v1/rates/{id} status = %d, want 204", delResp.StatusCode)
+	}
+
+	// Deleting again should return 404 (already retired)
+	delReqAgain, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/rates/%d", testServer.URL, createdRate2.ID), nil)
+	delRespAgain, err := http.DefaultClient.Do(delReqAgain)
+	if err != nil {
+		t.Fatalf("DELETE again: %v", err)
+	}
+	defer delRespAgain.Body.Close()
+	if delRespAgain.StatusCode != http.StatusNotFound {
+		t.Errorf("second DELETE status = %d, want 404", delRespAgain.StatusCode)
+	}
+}
