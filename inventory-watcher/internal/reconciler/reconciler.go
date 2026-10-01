@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/osac-project/cost-event-consumer/internal/inventory"
@@ -16,6 +17,7 @@ type Reconciler struct {
 	store    *inventory.Store
 	watcher  *watcher.Watcher
 	interval time.Duration
+	entities map[string]bool
 	logger   *slog.Logger
 }
 
@@ -27,6 +29,20 @@ func New(client *osac.Client, store *inventory.Store, w *watcher.Watcher, interv
 		interval: interval,
 		logger:   logger,
 	}
+}
+
+// SetEntities configures the specific entities the reconciler processes.
+// When empty, "all", or "*", all supported entities are processed.
+func (r *Reconciler) SetEntities(entities map[string]bool) {
+	r.entities = entities
+}
+
+// IsEntityEnabled reports whether the named entity is enabled for reconciliation.
+func (r *Reconciler) IsEntityEnabled(name string) bool {
+	if len(r.entities) == 0 || r.entities["all"] || r.entities["*"] {
+		return true
+	}
+	return r.entities[strings.ToLower(name)]
 }
 
 // Run periodically reconciles OSAC state with the local inventory.
@@ -50,13 +66,27 @@ func (r *Reconciler) Run(ctx context.Context) error {
 func (r *Reconciler) ReconcileAll(ctx context.Context) {
 	r.logger.Info("starting reconciliation")
 
-	r.reconcileProjects(ctx)
-	r.reconcileTenants(ctx)
-	r.reconcileComputeInstances(ctx)
-	r.reconcileClusters(ctx)
-	r.reconcileInstanceTypes(ctx)
-	r.reconcileBareMetalInstances(ctx)
-	r.reconcileCatalogItems(ctx)
+	if r.IsEntityEnabled("projects") {
+		r.reconcileProjects(ctx)
+	}
+	if r.IsEntityEnabled("tenants") {
+		r.reconcileTenants(ctx)
+	}
+	if r.IsEntityEnabled("compute_instances") {
+		r.reconcileComputeInstances(ctx)
+	}
+	if r.IsEntityEnabled("clusters") {
+		r.reconcileClusters(ctx)
+	}
+	if r.IsEntityEnabled("instance_types") {
+		r.reconcileInstanceTypes(ctx)
+	}
+	if r.IsEntityEnabled("bare_metal_instances") {
+		r.reconcileBareMetalInstances(ctx)
+	}
+	if r.IsEntityEnabled("catalog_items") {
+		r.reconcileCatalogItems(ctx)
+	}
 
 	r.logger.Info("reconciliation complete")
 }

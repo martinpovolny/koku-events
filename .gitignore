@@ -86,6 +86,8 @@ alembic.ini.local
 inventory-watcher/inventory-watcher
 inventory-watcher/consumer
 inventory-watcher/maas-simulator
+inventory-watcher/event-replayer
+inventory-watcher/osac-request-generator
 *.exe
 *.test
 *.prof

@@ -131,11 +131,13 @@ func main() {
 		}
 		w = watcher.New(osacClient, store, m, logger)
 		r = reconciler.New(osacClient, store, w, cfg.ReconcileInterval, logger)
+		r.SetEntities(cfg.ReconcileEntities)
 	}
 
 	logger.Info("starting cost-event-consumer",
 		"osac_url", cfg.OSACBaseURL,
 		"reconcile_interval", cfg.ReconcileInterval,
+		"reconcile_entities", cfg.ReconcileEntities,
 		"metering_interval", cfg.MeteringInterval,
 		"rating_interval", cfg.RatingInterval,
 		"ingest_addr", cfg.IngestListenAddr,
