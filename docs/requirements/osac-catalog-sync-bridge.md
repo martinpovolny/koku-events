@@ -104,8 +104,8 @@ To avoid this conflict while still syncing catalog data, the reconciler supports
 |---|---|---|---|
 | `catalog_items` | `inventory_catalog_item` | Cluster, compute, and bare metal catalog templates / SKUs | **Enabled** |
 | `instance_types` | `inventory_instance_type` | Machine sizing specifications (cores, memory GiB) | **Enabled** |
-| `tenants` | `inventory_tenant` | Tenant IDs, names, and labels for wallet attribution | **Enabled** |
-| `projects` | `inventory_project` | Project IDs, names, and tenant relationships | **Enabled** |
+| `tenants` | `inventory_tenant` | Tenant IDs, names, and labels for wallet attribution | **Only when OSAC exposes the list endpoint** |
+| `projects` | `inventory_project` | Project IDs, names, and tenant relationships | **Only when OSAC exposes the list endpoint** |
 | `compute_instances` | `inventory_compute_instance` | Live VM instances | **Disabled** (owned by Cost Adapter) |
 | `clusters` | `inventory_cluster` | Live Kubernetes clusters | **Disabled** (owned by Cost Adapter) |
 | `bare_metal_instances`| `inventory_bare_metal_instance` | Live bare metal instances | **Disabled** (owned by Cost Adapter) |
@@ -118,7 +118,7 @@ To avoid this conflict while still syncing catalog data, the reconciler supports
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
-| `RECONCILE_ENTITIES` | string | `all` | Comma-separated list of entities to reconcile. Can be `all`, `*`, or a specific subset (e.g. `catalog_items,instance_types,tenants,projects`). |
+| `RECONCILE_ENTITIES` | string | `all` | Comma-separated list of entities to reconcile. Can be `all`, `*`, or a specific subset (e.g. `catalog_items,instance_types`). |
 | `DISABLE_COMPONENTS` | string | *(empty)* | Comma-separated list of application components to disable (e.g. `watcher`). |
 | `RECONCILE_INTERVAL` | duration | `1h` | Polling frequency for reconciler sweeps. |
 | `OSAC_BASE_URL` | string | `http://localhost:8011` | OSAC REST API base URL. |
@@ -138,11 +138,17 @@ env:
   # The reconciler is active as an interim bridge for catalog and tenancy metadata only.
   # Runtime workload instances (compute_instances, clusters, bare_metal_instances) are excluded:
   - name: RECONCILE_ENTITIES
-    value: "catalog_items,instance_types,tenants,projects"
+    value: "catalog_items,instance_types"
 
   - name: RECONCILE_INTERVAL
     value: "1h"
 ```
+
+Add `tenants,projects` only after verifying the OSAC deployment serves
+`GET /api/fulfillment/v1/tenants` and `GET /api/fulfillment/v1/projects`.
+The local CRC OSAC build checked on 2026-10-01 returns 404 for both. An empty
+OSAC catalog also produces zero synchronized catalog rows; a non-zero sync
+requires catalog items to exist in OSAC first.
 
 ---
 

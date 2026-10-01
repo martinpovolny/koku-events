@@ -22,6 +22,7 @@ Documentation for running the cost-event-consumer in different environments.
 | File | Purpose | Audience |
 |------|---------|----------|
 | **crc-full-deployment.md** | Complete step-by-step CRC deployment | Reference for detailed steps |
+| **[crc-deployment-dashboard.html](crc-deployment-dashboard.html)** | Snapshot of the local CRC stack, versions, health, and flow blockers (captured 2026-10-01) | Deployment status at capture time |
 | **local-dev-setup.md** | Local development (Docker + native binaries) | Developers working on the code |
 | **[`.devcontainer/`](../../.devcontainer/)** | GitHub Codespaces config (k3d, k9s, Claude Code) | Zero-install browser-based dev |
 
