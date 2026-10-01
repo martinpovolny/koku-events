@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -25,6 +26,7 @@ type Config struct {
 	AuthIssuerURL           string
 	DebugDashboard     bool
 	DisabledComponents map[string]bool
+	ReconcileEntities  map[string]bool
 	SplunkHECURL       string
 	SplunkHECToken     string
 	SplunkIndex        string
@@ -38,12 +40,13 @@ type Config struct {
 
 // DiagnosticInfo returns config values safe to expose via the debug API (no secrets).
 type DiagnosticInfo struct {
-	OSACBaseURL       string `json:"osac_base_url"`
-	InventoryDBHost   string `json:"inventory_db_host"`
-	ReconcileInterval string `json:"reconcile_interval"`
-	MeteringInterval  string `json:"metering_interval"`
-	RatingInterval    string `json:"rating_interval"`
-	LogLevel          string `json:"log_level"`
+	OSACBaseURL       string   `json:"osac_base_url"`
+	InventoryDBHost   string   `json:"inventory_db_host"`
+	ReconcileInterval string   `json:"reconcile_interval"`
+	ReconcileEntities []string `json:"reconcile_entities,omitempty"`
+	MeteringInterval  string   `json:"metering_interval"`
+	RatingInterval    string   `json:"rating_interval"`
+	LogLevel          string   `json:"log_level"`
 	LogFormat               string `json:"log_format"`
 	IngestListenAddr        string `json:"ingest_listen_addr"`
 	MetricsPort             string `json:"metrics_port"`
@@ -58,10 +61,17 @@ type DiagnosticInfo struct {
 }
 
 func (c *Config) Diagnostics() DiagnosticInfo {
+	var reconcileEntities []string
+	for e := range c.ReconcileEntities {
+		reconcileEntities = append(reconcileEntities, e)
+	}
+	sort.Strings(reconcileEntities)
+
 	return DiagnosticInfo{
 		OSACBaseURL:       c.OSACBaseURL,
 		InventoryDBHost:   maskDBURL(c.InventoryDBURL),
 		ReconcileInterval: c.ReconcileInterval.String(),
+		ReconcileEntities: reconcileEntities,
 		MeteringInterval:  c.MeteringInterval.String(),
 		RatingInterval:    c.RatingInterval.String(),
 		LogLevel:          c.LogLevel,
@@ -124,6 +134,7 @@ func Load() *Config {
 		AuthIssuerURL:      os.Getenv("AUTH_ISSUER_URL"),
 		DebugDashboard:     envOrDefault("DEBUG_DASHBOARD", "true") != "false",
 		DisabledComponents: parseDisabledComponents(os.Getenv("DISABLE_COMPONENTS")),
+		ReconcileEntities:  parseReconcileEntities(os.Getenv("RECONCILE_ENTITIES")),
 		SplunkHECURL:       os.Getenv("SPLUNK_HEC_URL"),
 		SplunkHECToken:     os.Getenv("SPLUNK_HEC_TOKEN"),
 		SplunkIndex:        os.Getenv("SPLUNK_INDEX"),
@@ -138,6 +149,27 @@ func Load() *Config {
 
 func (c *Config) ComponentDisabled(name string) bool {
 	return c.DisabledComponents[name]
+}
+
+func (c *Config) ReconcileEntityEnabled(name string) bool {
+	if len(c.ReconcileEntities) == 0 || c.ReconcileEntities["all"] || c.ReconcileEntities["*"] {
+		return true
+	}
+	return c.ReconcileEntities[strings.ToLower(name)]
+}
+
+func parseReconcileEntities(s string) map[string]bool {
+	m := make(map[string]bool)
+	if s == "" {
+		return m
+	}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(strings.ToLower(part))
+		if part != "" {
+			m[part] = true
+		}
+	}
+	return m
 }
 
 func parseDisabledComponents(s string) map[string]bool {

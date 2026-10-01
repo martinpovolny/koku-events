@@ -148,3 +148,98 @@ func TestLoad_DebugDashboardFalse(t *testing.T) {
 		t.Error("DEBUG_DASHBOARD=false should disable dashboard")
 	}
 }
+
+func TestParseReconcileEntities(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{"empty", "", nil},
+		{"single", "catalog_items", []string{"catalog_items"}},
+		{"multiple with spaces", " catalog_items , instance_types, tenants ", []string{"catalog_items", "instance_types", "tenants"}},
+		{"uppercase normalized", "CATALOG_ITEMS,Instance_Types", []string{"catalog_items", "instance_types"}},
+		{"trailing comma", "catalog_items,", []string{"catalog_items"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := parseReconcileEntities(tc.input)
+			if len(m) != len(tc.want) {
+				t.Fatalf("parseReconcileEntities(%q) len = %d, want %d", tc.input, len(m), len(tc.want))
+			}
+			for _, k := range tc.want {
+				if !m[k] {
+					t.Errorf("parseReconcileEntities(%q) missing %q", tc.input, k)
+				}
+			}
+		})
+	}
+}
+
+func TestReconcileEntityEnabled(t *testing.T) {
+	t.Run("default empty enables all", func(t *testing.T) {
+		cfg := Config{}
+		if !cfg.ReconcileEntityEnabled("catalog_items") {
+			t.Error("expected catalog_items enabled by default")
+		}
+		if !cfg.ReconcileEntityEnabled("compute_instances") {
+			t.Error("expected compute_instances enabled by default")
+		}
+	})
+
+	t.Run("all wildcard enables all", func(t *testing.T) {
+		cfg := Config{ReconcileEntities: parseReconcileEntities("all")}
+		if !cfg.ReconcileEntityEnabled("catalog_items") {
+			t.Error("expected catalog_items enabled with 'all'")
+		}
+		if !cfg.ReconcileEntityEnabled("compute_instances") {
+			t.Error("expected compute_instances enabled with 'all'")
+		}
+
+		cfgStar := Config{ReconcileEntities: parseReconcileEntities("*")}
+		if !cfgStar.ReconcileEntityEnabled("clusters") {
+			t.Error("expected clusters enabled with '*'")
+		}
+	})
+
+	t.Run("selective filter enables only requested", func(t *testing.T) {
+		cfg := Config{ReconcileEntities: parseReconcileEntities("catalog_items,instance_types,tenants,projects")}
+		if !cfg.ReconcileEntityEnabled("catalog_items") {
+			t.Error("expected catalog_items enabled")
+		}
+		if !cfg.ReconcileEntityEnabled("instance_types") {
+			t.Error("expected instance_types enabled")
+		}
+		if !cfg.ReconcileEntityEnabled("tenants") {
+			t.Error("expected tenants enabled")
+		}
+		if !cfg.ReconcileEntityEnabled("projects") {
+			t.Error("expected projects enabled")
+		}
+		if cfg.ReconcileEntityEnabled("compute_instances") {
+			t.Error("compute_instances should be disabled")
+		}
+		if cfg.ReconcileEntityEnabled("clusters") {
+			t.Error("clusters should be disabled")
+		}
+		if cfg.ReconcileEntityEnabled("bare_metal_instances") {
+			t.Error("bare_metal_instances should be disabled")
+		}
+	})
+}
+
+func TestDiagnostics_ReconcileEntities(t *testing.T) {
+	cfg := Config{
+		ReconcileEntities: parseReconcileEntities("instance_types,catalog_items"),
+	}
+	diag := cfg.Diagnostics()
+
+	if len(diag.ReconcileEntities) != 2 {
+		t.Fatalf("expected 2 entities, got %d", len(diag.ReconcileEntities))
+	}
+	if diag.ReconcileEntities[0] != "catalog_items" || diag.ReconcileEntities[1] != "instance_types" {
+		t.Errorf("expected sorted entities [catalog_items instance_types], got %v", diag.ReconcileEntities)
+	}
+}
+

@@ -60,6 +60,7 @@ the primary batch ingestion API.
 | [CloudEvents catalog](cloudevents-catalog.md) | CloudEvent types, formats, authoritative sources |
 | [API reference](api-reference.md) | HTTP endpoints, probes, metrics server |
 | [Observability](observability.md) | Prometheus metrics, K8s probes, structured logging, graceful shutdown |
+| [OSAC catalog sync bridge](requirements/osac-catalog-sync-bridge.md) | Interim catalog synchronization via reconciler until OSAC-3876 |
 
 ## Requirements & Status
 

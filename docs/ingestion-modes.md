@@ -94,15 +94,18 @@ events. Heartbeat payloads carry their metering duration and may omit
 `transition_time`; they use the same batch endpoint and are persisted and
 processed by the downstream cost pipeline.
 
-A batch-only process should disable the retained OSAC components and leave
-Kafka unset:
+A batch-only runtime with catalog synchronization enables the reconciler
+specifically for catalog and tenancy metadata while keeping the gRPC watcher
+disabled (interim solution until [OSAC-3876](https://redhat.atlassian.net/browse/OSAC-3876)):
 
 ```text
 INGEST_LISTEN_ADDR=:8020
-DISABLE_COMPONENTS=watcher,reconciler
+DISABLE_COMPONENTS=watcher
+RECONCILE_ENTITIES=catalog_items,instance_types,tenants,projects
 ```
 
-See the [batch ingestion contract](requirements/osac-batch-ingest-contract.md)
+See the [batch ingestion contract](requirements/osac-batch-ingest-contract.md),
+[interim catalog sync bridge](requirements/osac-catalog-sync-bridge.md),
 and [API reference](api-reference.md).
 
 ## Runtime controls
@@ -110,6 +113,7 @@ and [API reference](api-reference.md).
 | Variable | Purpose |
 |---|---|
 | `DISABLE_COMPONENTS` | Comma-separated components such as `watcher,reconciler` |
+| `RECONCILE_ENTITIES` | Comma-separated entities for the reconciler, e.g. `catalog_items,instance_types,tenants,projects` (default `all`) |
 | `KAFKA_BROKERS` | Enables the optional Kafka experiment when non-empty |
 | `KAFKA_MODE` | Kafka mode: `producer`, `consumer`, or `both` |
 | `KAFKA_CONSUMER_GROUP` | Kafka consumer group name |
