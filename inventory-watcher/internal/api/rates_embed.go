@@ -140,9 +140,10 @@ const ratesHTML = `<!DOCTYPE html>
     <span class="header-logo">Cost Management</span>
     <span class="header-sub">Catalog &amp; Rates</span>
     <nav class="header-nav">
-      <a href="/rates" class="active">Catalog &amp; Rates</a>
-      <a href="/reports">Reports</a>
-      <a href="/debug/dashboard">Diagnostics</a>
+      <a href="/ui">Overview</a>
+      <a href="/ui/rates" class="active">Catalog &amp; Rates</a>
+      <a href="/ui/reports">Reports</a>
+      <a href="/ui/dashboard">Diagnostics</a>
     </nav>
   </div>
   <div class="header-right">

@@ -14,8 +14,13 @@ const dashboardHTML = `<!DOCTYPE html>
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
-  .header { background: var(--accent); color: white; padding: 1rem 2rem; display: flex; align-items: center; justify-content: space-between; }
-  .header h1 { font-size: 1.3rem; font-weight: 600; }
+  .header { background: var(--accent); color: white; padding: 0.75rem 2rem; display: flex; align-items: center; justify-content: space-between; }
+  .header-left { display: flex; align-items: center; gap: 1rem; }
+  .header h1 { font-size: 1.2rem; font-weight: 600; }
+  .header-nav { display: flex; align-items: center; gap: 0.75rem; margin-left: 1.5rem; }
+  .header-nav a { color: rgba(255,255,255,0.85); text-decoration: none; font-size: 0.82rem; padding: 0.25rem 0.5rem; border-radius: 4px; }
+  .header-nav a:hover { background: rgba(255,255,255,0.15); color: white; }
+  .header-nav a.active { background: rgba(0,0,0,0.2); font-weight: 600; color: white; }
   .header-right { display: flex; align-items: center; gap: 1rem; font-size: 0.85rem; }
   .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   .status-dot.ok { background: #69F0AE; }
@@ -69,7 +74,15 @@ const dashboardHTML = `<!DOCTYPE html>
 <body>
 
 <div class="header">
-  <h1>Cost Management — Diagnostics</h1>
+  <div class="header-left">
+    <h1>Cost Management — Diagnostics</h1>
+    <nav class="header-nav">
+      <a href="/ui">Overview</a>
+      <a href="/ui/rates">Catalog &amp; Rates</a>
+      <a href="/ui/reports">Reports</a>
+      <a href="/ui/dashboard" class="active">Diagnostics</a>
+    </nav>
+  </div>
   <div class="header-right">
     <span class="status-dot" id="statusDot"></span>
     <span id="statusText">Connecting...</span>

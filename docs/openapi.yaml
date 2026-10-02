@@ -1441,7 +1441,37 @@ paths:
                 splunk_token_set: false
                 splunk_index: ""
 
-  /reports:
+  /:
+    get:
+      operationId: getIndex
+      tags: [Operations]
+      summary: Service overview and API directory (HTML)
+      description: >-
+        Landing page providing an interactive directory of available web UI applications
+        (/ui/rates, /ui/reports, /ui/dashboard) and programmatic REST API endpoints.
+      responses:
+        "200":
+          description: Portal overview and directory HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /ui:
+    get:
+      operationId: getPortalUI
+      tags: [Operations]
+      summary: Web UI portal directory (HTML)
+      description: Interactive directory of available web UI tools and applications.
+      responses:
+        "200":
+          description: Portal overview and directory HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /ui/reports:
     get:
       operationId: getReports
       tags: [Operations]
@@ -1455,9 +1485,6 @@ paths:
         The page loads without authentication; API calls within the page
         include a Bearer token stored in browser localStorage. A token
         modal auto-opens on 401.
-
-
-        `GET /` redirects here.
       responses:
         "200":
           description: Reports HTML page
@@ -1466,7 +1493,7 @@ paths:
               schema:
                 type: string
 
-  /rates:
+  /ui/rates:
     get:
       operationId: getRatesUI
       tags: [Operations]
@@ -1484,7 +1511,7 @@ paths:
               schema:
                 type: string
 
-  /debug/dashboard:
+  /ui/dashboard:
     get:
       operationId: getDebugDashboard
       tags: [Operations]

@@ -23,6 +23,10 @@ const reportsHTML = `<!DOCTYPE html>
   .header-left { display: flex; align-items: center; gap: 1rem; }
   .header-logo { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.02em; }
   .header-sub { font-size: 0.82rem; opacity: 0.8; padding-left: 1rem; border-left: 1px solid rgba(255,255,255,0.3); }
+  .header-nav { display: flex; align-items: center; gap: 0.75rem; margin-left: 1.5rem; }
+  .header-nav a { color: rgba(255,255,255,0.85); text-decoration: none; font-size: 0.82rem; padding: 0.25rem 0.5rem; border-radius: 4px; }
+  .header-nav a:hover { background: rgba(255,255,255,0.15); color: white; }
+  .header-nav a.active { background: rgba(0,0,0,0.2); font-weight: 600; color: white; }
   .header-right { display: flex; align-items: center; gap: 0.75rem; }
   .token-btn { padding: 0.3rem 0.8rem; border-radius: 4px;
                border: 1px solid rgba(255,255,255,0.4); background: transparent;
@@ -129,6 +133,12 @@ const reportsHTML = `<!DOCTYPE html>
   <div class="header-left">
     <span class="header-logo">Cost Management</span>
     <span class="header-sub">Reports</span>
+    <nav class="header-nav">
+      <a href="/ui">Overview</a>
+      <a href="/ui/rates">Catalog &amp; Rates</a>
+      <a href="/ui/reports" class="active">Reports</a>
+      <a href="/ui/dashboard">Diagnostics</a>
+    </nav>
   </div>
   <div class="header-right">
     <span id="lastUpdated" style="font-size:0.78rem;opacity:0.7"></span>

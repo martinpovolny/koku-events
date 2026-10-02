@@ -2371,9 +2371,58 @@ func TestIngestEventBatchMalformedMemberRollsBackAllMembers(t *testing.T) {
 	}
 }
 
+func TestGetIndex(t *testing.T) {
+	h := api.NewAPIHandler(nil, nil, nil, nil, testLogger)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	h.GetIndex(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") {
+		t.Errorf("expected text/html Content-Type, got %q", contentType)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "Cost Management") {
+		t.Errorf("expected HTML body to contain 'Cost Management'")
+	}
+	if !strings.Contains(bodyStr, "/ui/rates") {
+		t.Errorf("expected HTML body to contain '/ui/rates'")
+	}
+	if !strings.Contains(bodyStr, "/ui/reports") {
+		t.Errorf("expected HTML body to contain '/ui/reports'")
+	}
+	if !strings.Contains(bodyStr, "/ui/dashboard") {
+		t.Errorf("expected HTML body to contain '/ui/dashboard'")
+	}
+	if !strings.Contains(bodyStr, "/api/v1/rates") {
+		t.Errorf("expected HTML body to contain '/api/v1/rates'")
+	}
+}
+
+func TestGetPortalUI(t *testing.T) {
+	h := api.NewAPIHandler(nil, nil, nil, nil, testLogger)
+	req := httptest.NewRequest(http.MethodGet, "/ui", nil)
+	w := httptest.NewRecorder()
+	h.GetPortalUI(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") {
+		t.Errorf("expected text/html Content-Type, got %q", contentType)
+	}
+}
+
 func TestGetRatesUI(t *testing.T) {
 	h := api.NewAPIHandler(nil, nil, nil, nil, testLogger)
-	req := httptest.NewRequest(http.MethodGet, "/rates", nil)
+	req := httptest.NewRequest(http.MethodGet, "/ui/rates", nil)
 	w := httptest.NewRecorder()
 	h.GetRatesUI(w, req)
 
@@ -2395,6 +2444,47 @@ func TestGetRatesUI(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "/api/v1/rates") {
 		t.Errorf("expected HTML body to contain '/api/v1/rates'")
+	}
+}
+
+func TestUIRoutesAndRedirects(t *testing.T) {
+	h := api.NewAPIHandler(nil, nil, nil, nil, testLogger)
+	mux := http.NewServeMux()
+	api.HandlerFromMux(h, mux)
+	h.RegisterDebugRoutes(mux)
+
+	tests := []struct {
+		path         string
+		wantStatus   int
+		wantLocation string
+	}{
+		{path: "/", wantStatus: http.StatusOK},
+		{path: "/ui", wantStatus: http.StatusOK},
+		{path: "/ui/rates", wantStatus: http.StatusOK},
+		{path: "/ui/reports", wantStatus: http.StatusOK},
+		{path: "/ui/dashboard", wantStatus: http.StatusOK},
+		{path: "/rates", wantStatus: http.StatusMovedPermanently, wantLocation: "/ui/rates"},
+		{path: "/reports", wantStatus: http.StatusMovedPermanently, wantLocation: "/ui/reports"},
+		{path: "/debug/dashboard", wantStatus: http.StatusMovedPermanently, wantLocation: "/ui/dashboard"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+
+			resp := w.Result()
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("GET %s status = %d; want %d", tc.path, resp.StatusCode, tc.wantStatus)
+			}
+			if tc.wantLocation != "" {
+				loc := resp.Header.Get("Location")
+				if loc != tc.wantLocation {
+					t.Errorf("GET %s Location = %q; want %q", tc.path, loc, tc.wantLocation)
+				}
+			}
+		})
 	}
 }
 

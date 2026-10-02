@@ -2005,6 +2005,18 @@ func (h *APIHandler) TriggerReconcile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "reconciliation triggered"})
 }
 
+// GetIndex serves the service overview and API directory portal (HTML).
+func (h *APIHandler) GetIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(indexHTML))
+}
+
+// GetPortalUI serves the interactive web UI directory portal (HTML).
+func (h *APIHandler) GetPortalUI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(indexHTML))
+}
+
 // GetReports serves the manager-facing cost reports UI (HTML).
 func (h *APIHandler) GetReports(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -2023,12 +2035,19 @@ func (h *APIHandler) GetRatesUI(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(ratesHTML))
 }
 
-// RegisterDebugRoutes adds GET / (redirect to /reports).
-// /reports and /debug/dashboard are registered via HandlerFromMux (both in server.gen.go).
+// RegisterDebugRoutes registers backwards-compatible redirects for legacy UI paths:
+//   - GET /reports -> /ui/reports
+//   - GET /rates -> /ui/rates
+//   - GET /debug/dashboard -> /ui/dashboard
+// Note: GET / and GET /ui are handled by HandlerFromMux via ServerInterface.
 func (h *APIHandler) RegisterDebugRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			http.Redirect(w, r, "/reports", http.StatusFound)
-		}
+	mux.HandleFunc("GET /reports", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/reports", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("GET /rates", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/rates", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("GET /debug/dashboard", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/dashboard", http.StatusMovedPermanently)
 	})
 }
