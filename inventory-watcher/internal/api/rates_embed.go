@@ -453,6 +453,16 @@ function findMatchingRate(resourceType, instanceType) {
     (!r.instance_type || r.instance_type === ''));
 }
 
+function escapeHTML(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function formatPriceDisplay(rate) {
   if (!rate) return '<span class="badge badge-unpriced">Unpriced</span>';
   const price = parseFloat(rate.price_per_unit) || 0;
@@ -461,7 +471,7 @@ function formatPriceDisplay(rate) {
     return '<span class="badge badge-priced">$' + hourly.toFixed(4) + ' / hr</span>' +
            ' <span style="font-size:0.75rem;color:var(--muted)">($' + price.toFixed(8) + '/s)</span>';
   }
-  return '<span class="badge badge-priced">$' + price.toFixed(6) + ' / ' + (rate.currency || 'USD') + '</span>';
+  return '<span class="badge badge-priced">$' + price.toFixed(6) + ' / ' + escapeHTML(rate.currency || 'USD') + '</span>';
 }
 
 function renderAll() {
@@ -544,17 +554,17 @@ function renderAll() {
       else if (item.category === 'bare_metal') badgeClass = 'badge-bm';
       else if (item.category === 'model') badgeClass = 'badge-supp';
 
-      const meterText = item.rate ? '<span class="code-text">' + item.rate.meter_name + '</span>' : '<span style="color:var(--muted)">—</span>';
+      const meterText = item.rate ? '<span class="code-text">' + escapeHTML(item.rate.meter_name) + '</span>' : '<span style="color:var(--muted)">—</span>';
       const actionText = item.rate ? 'Edit Rate' : 'Assign Rate';
 
       return '<tr>' +
-        '<td><span class="badge ' + badgeClass + '">' + item.categoryLabel + '</span></td>' +
-        '<td><span class="code-text" style="font-weight:600">' + item.sku + '</span></td>' +
-        '<td><div><strong>' + item.title + '</strong></div><div style="font-size:0.78rem;color:var(--muted)">' + item.specs + '</div></td>' +
-        '<td><span style="font-size:0.8rem;text-transform:capitalize">' + item.status + '</span></td>' +
+        '<td><span class="badge ' + escapeHTML(badgeClass) + '">' + escapeHTML(item.categoryLabel) + '</span></td>' +
+        '<td><span class="code-text" style="font-weight:600">' + escapeHTML(item.sku) + '</span></td>' +
+        '<td><div><strong>' + escapeHTML(item.title) + '</strong></div><div style="font-size:0.78rem;color:var(--muted)">' + escapeHTML(item.specs) + '</div></td>' +
+        '<td><span style="font-size:0.8rem;text-transform:capitalize">' + escapeHTML(item.status) + '</span></td>' +
         '<td>' + formatPriceDisplay(item.rate) + '</td>' +
         '<td>' + meterText + '</td>' +
-        '<td class="num"><button class="btn-sm primary" onclick="openAssignModalFor(\'' + item.resourceType + '\', \'' + item.sku + '\')">' + actionText + '</button></td>' +
+        '<td class="num"><button class="btn-sm primary btn-assign" data-resource-type="' + escapeHTML(item.resourceType) + '" data-sku="' + escapeHTML(item.sku) + '">' + escapeHTML(actionText) + '</button></td>' +
       '</tr>';
     }).join('');
   }
@@ -568,21 +578,21 @@ function renderAll() {
       const price = parseFloat(r.price_per_unit) || 0;
       const isUptime = r.meter_name && r.meter_name.includes('seconds');
       const hourly = isUptime ? '$' + (price * 3600).toFixed(4) + '/hr' : '—';
-      const tenant = r.tenant_id ? '<span class="code-text">' + r.tenant_id + '</span>' : '<span class="badge badge-infra">Global</span>';
+      const tenant = r.tenant_id ? '<span class="code-text">' + escapeHTML(r.tenant_id) + '</span>' : '<span class="badge badge-infra">Global</span>';
       const costBadge = r.cost_type === 'Supplementary' ? 'badge-supp' : 'badge-infra';
       const effFrom = r.effective_from ? new Date(r.effective_from).toLocaleDateString() : '—';
 
       return '<tr>' +
-        '<td>' + r.id + '</td>' +
+        '<td>' + escapeHTML(r.id) + '</td>' +
         '<td>' + tenant + '</td>' +
-        '<td><span class="code-text">' + r.resource_type + '</span></td>' +
-        '<td><span class="code-text">' + (r.instance_type || '*(any)*') + '</span></td>' +
-        '<td><span class="code-text">' + r.meter_name + '</span></td>' +
-        '<td><span class="badge ' + costBadge + '">' + r.cost_type + '</span></td>' +
+        '<td><span class="code-text">' + escapeHTML(r.resource_type) + '</span></td>' +
+        '<td><span class="code-text">' + escapeHTML(r.instance_type || '*(any)*') + '</span></td>' +
+        '<td><span class="code-text">' + escapeHTML(r.meter_name) + '</span></td>' +
+        '<td><span class="badge ' + costBadge + '">' + escapeHTML(r.cost_type) + '</span></td>' +
         '<td class="num">$' + price.toFixed(8) + '</td>' +
         '<td class="num">' + hourly + '</td>' +
         '<td>' + effFrom + '</td>' +
-        '<td class="num"><button class="btn-sm" style="color:var(--red);border-color:#fca5a5" onclick="retireRate(' + r.id + ')">Retire</button></td>' +
+        '<td class="num"><button class="btn-sm btn-retire" data-rate-id="' + escapeHTML(r.id) + '" style="color:var(--red);border-color:#fca5a5">Retire</button></td>' +
       '</tr>';
     }).join('');
   }
@@ -717,6 +727,23 @@ function downloadCSV() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
+  $('catalogBody').addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-assign');
+    if (btn) {
+      openAssignModalFor(btn.dataset.resourceType, btn.dataset.sku);
+    }
+  });
+
+  $('ratesBody').addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-retire');
+    if (btn) {
+      const id = parseInt(btn.dataset.rateId, 10);
+      if (!isNaN(id)) {
+        retireRate(id);
+      }
+    }
+  });
+
   updateTokenBtn();
   loadAll();
 });

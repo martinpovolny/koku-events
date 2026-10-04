@@ -1164,6 +1164,13 @@ func (s *Store) UpsertRate(ctx context.Context, rec RateRecord) (int64, error) {
 	}
 
 	// Retire any currently active matching rate so the new rate cleanly takes over.
+	// Executed within a transaction so retire + insert are atomic.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin rate transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var retireQuery string
 	var retireArgs []any
 	if rec.TenantID != nil && *rec.TenantID != "" {
@@ -1172,6 +1179,7 @@ func (s *Store) UpsertRate(ctx context.Context, rec RateRecord) (int64, error) {
 			SET effective_to = $1
 			WHERE resource_type = $2 AND meter_name = $3 AND instance_type = $4
 			  AND tenant_id = $5
+			  AND effective_from < $1
 			  AND (effective_to IS NULL OR effective_to > $1)
 		`
 		retireArgs = []any{rec.EffectiveFrom, rec.ResourceType, rec.MeterName, rec.InstanceType, *rec.TenantID}
@@ -1181,14 +1189,17 @@ func (s *Store) UpsertRate(ctx context.Context, rec RateRecord) (int64, error) {
 			SET effective_to = $1
 			WHERE resource_type = $2 AND meter_name = $3 AND instance_type = $4
 			  AND (tenant_id IS NULL OR tenant_id = '')
+			  AND effective_from < $1
 			  AND (effective_to IS NULL OR effective_to > $1)
 		`
 		retireArgs = []any{rec.EffectiveFrom, rec.ResourceType, rec.MeterName, rec.InstanceType}
 	}
-	_, _ = s.db.Exec(ctx, retireQuery, retireArgs...)
+	if _, err := tx.Exec(ctx, retireQuery, retireArgs...); err != nil {
+		return 0, fmt.Errorf("retire matching rates: %w", err)
+	}
 
 	var id int64
-	err := s.db.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO rates
 			(tenant_id, resource_type, instance_type, meter_name, koku_metric, cost_type, price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
@@ -1198,7 +1209,10 @@ func (s *Store) UpsertRate(ctx context.Context, rec RateRecord) (int64, error) {
 		rec.EffectiveFrom, rec.EffectiveTo).Scan(&id)
 
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("insert rate: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit rate transaction: %w", err)
 	}
 	return id, nil
 }

@@ -999,7 +999,6 @@ func (h *APIHandler) ListRates(w http.ResponseWriter, r *http.Request, params Li
 
 // CreateRate implements ServerInterface.
 func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 
 	var req CreateRateRequest
@@ -1056,6 +1055,12 @@ func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
 	if req.EffectiveFrom != nil && !req.EffectiveFrom.IsZero() {
 		effectiveFrom = *req.EffectiveFrom
 	}
+	if req.EffectiveTo != nil && !req.EffectiveTo.IsZero() {
+		if !req.EffectiveTo.After(effectiveFrom) {
+			writeErrorJSON(w, "effective_to must be after effective_from", http.StatusBadRequest)
+			return
+		}
+	}
 
 	var tiers []inventory.Tier
 	if req.Tiers != nil {
@@ -1108,8 +1113,6 @@ func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
 
 // DeleteRate implements ServerInterface.
 func (h *APIHandler) DeleteRate(w http.ResponseWriter, r *http.Request, id int64) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
 	found, err := h.store.DeleteRate(r.Context(), id)
 	if err != nil {
 		h.logger.Error("delete rate failed", "id", id, "error", err)

@@ -2526,6 +2526,16 @@ func TestCreateRate_Validation(t *testing.T) {
 			payload:    `{"resource_type":"compute_instance","meter_name":"vm_uptime_seconds","price_per_unit":"0.01","tiers":[{"price_per_unit":"bad"}]}`,
 			wantStatus: http.StatusBadRequest,
 		},
+		{
+			name:       "effective_to before effective_from",
+			payload:    `{"resource_type":"compute_instance","meter_name":"vm_uptime_seconds","price_per_unit":"0.01","effective_from":"2026-10-01T00:00:00Z","effective_to":"2026-09-01T00:00:00Z"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "effective_to equal to effective_from",
+			payload:    `{"resource_type":"compute_instance","meter_name":"vm_uptime_seconds","price_per_unit":"0.01","effective_from":"2026-10-01T00:00:00Z","effective_to":"2026-10-01T00:00:00Z"}`,
+			wantStatus: http.StatusBadRequest,
+		},
 	}
 
 	for _, tc := range tests {
@@ -2536,6 +2546,9 @@ func TestCreateRate_Validation(t *testing.T) {
 			resp := w.Result()
 			if resp.StatusCode != tc.wantStatus {
 				t.Errorf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+			if cors := resp.Header.Get("Access-Control-Allow-Origin"); cors != "" {
+				t.Errorf("expected no Access-Control-Allow-Origin on write endpoint, got %q", cors)
 			}
 		})
 	}
