@@ -1,6 +1,11 @@
 package osac
 
-import "time"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // Event represents an OSAC event from the Watch stream.
 // JSON field names use proto JSON format (snake_case).
@@ -173,6 +178,57 @@ type CatalogItem struct {
 	Description string   `json:"description"`
 	Template    string   `json:"template"`
 	Published   bool     `json:"published"`
+}
+
+// UnmarshalJSON accepts both the legacy catalog schema, where template is a
+// string, and the current OSAC schema, where it is a resource reference.
+func (c *CatalogItem) UnmarshalJSON(data []byte) error {
+	type catalogItemAlias CatalogItem
+	var item struct {
+		ID          string          `json:"id"`
+		Metadata    Metadata        `json:"metadata"`
+		Title       string          `json:"title"`
+		Description string          `json:"description"`
+		Template    json.RawMessage `json:"template"`
+		Published   bool            `json:"published"`
+	}
+	if err := json.Unmarshal(data, &item); err != nil {
+		return err
+	}
+
+	template, err := catalogItemTemplate(item.Template)
+	if err != nil {
+		return err
+	}
+	*c = CatalogItem(catalogItemAlias{
+		ID:          item.ID,
+		Metadata:    item.Metadata,
+		Title:       item.Title,
+		Description: item.Description,
+		Template:    template,
+		Published:   item.Published,
+	})
+	return nil
+}
+
+func catalogItemTemplate(data []byte) (string, error) {
+	if len(bytes.TrimSpace(data)) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return "", nil
+	}
+
+	var name string
+	if err := json.Unmarshal(data, &name); err == nil {
+		return name, nil
+	}
+
+	var ref ResourceReference
+	if err := json.Unmarshal(data, &ref); err != nil {
+		return "", fmt.Errorf("decode catalog item template: %w", err)
+	}
+	if ref.ID != "" {
+		return ref.ID, nil
+	}
+	return ref.Name, nil
 }
 
 // Event type constants matching the protobuf enum.

@@ -777,6 +777,12 @@ func (h *APIHandler) processOSACComputeInstance(ctx context.Context, ce cloudEve
 	if bd.InstanceType != nil {
 		instanceType = *bd.InstanceType
 	}
+	// Catalog-backed compute instances are priced by catalog SKU. Prefer the
+	// catalog item dimension when present, while retaining the instance type
+	// fallback for direct template requests and older event payloads.
+	if md.CatalogItemID != nil && *md.CatalogItemID != "" {
+		instanceType = *md.CatalogItemID
+	}
 
 	project := ""
 	if md.ProjectID != nil {
@@ -2041,6 +2047,7 @@ func (h *APIHandler) GetRatesUI(w http.ResponseWriter, r *http.Request) {
 // RegisterLegacyRoutes registers backwards-compatible redirects for legacy UI paths:
 //   - GET /reports -> /ui/reports
 //   - GET /rates -> /ui/rates
+//
 // These are always registered so existing bookmarks and links continue to work
 // regardless of whether the debug dashboard is enabled.
 func (h *APIHandler) RegisterLegacyRoutes(mux *http.ServeMux) {
