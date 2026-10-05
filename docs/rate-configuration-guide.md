@@ -64,7 +64,7 @@ The PoC supports four distinct rate forms across its two rating tiers:
 | **Per-Tenant Rate** | Static (`rates`) | `rates.tenant_id` | Negotiated contracts and tenant-specific discounts | Tenant `tenant-acme` pays `$0.15/hr` instead of `$0.20/hr` |
 | **Tiered (`per_event`)** | Static (`rates`) | `rates.tiers` (JSONB) | Independent graduated pricing per transaction/request | Large MaaS inference requests where tier resets each call |
 | **Tiered (`cumulative`)** | Static (`rates`) | `rates.tiers` + `rates.tier_period` | Monthly or windowed volume/capacity tiers with free allowance | First 20 GiB memory free/month, then `$0.08/GiB`, then `$0.07/GiB` |
-| **Programmable (GoRules)** | Rule Engine (Zen) | `pricing_rules` table / `rules/*.json` | Multi-factor logic, commitment agreements, and tenant tier labels | `standard-4-16` + `gold` tier label $\rightarrow$ 20% discount; CUD overage $\rightarrow$ sustained use |
+| **Programmable (GoRules)** | Rule Engine (Zen) | `pricing_rules` table / `rules/*.json` | Multi-factor logic, commitment agreements, and tenant tier labels | `standard-4-16` + `gold` tier label → 20% discount; CUD overage → sustained use |
 
 ---
 
@@ -72,7 +72,7 @@ The PoC supports four distinct rate forms across its two rating tiers:
 
 ### Why Programmable Rules?
 
-Scalar rate tables work well for $X \times \text{rate}$ lookups. However, real enterprise cloud pricing frequently requires **multi-factor decision logic**:
+Scalar rate tables work well for `quantity × rate` lookups. However, real enterprise cloud pricing frequently requires **multi-factor decision logic**:
 - Tenant tier discounts derived from metadata or labels (e.g. `cost-mgmt/tier=gold`).
 - Committed-Use Discounts (CUD) with sustained-use fallbacks based on monthly utilization %.
 - Business policies that change without modifying Go code or redeploying binaries.
@@ -104,7 +104,7 @@ Evaluates a 2D decision table mapping `(instance_type, tenant_tier)` to base pri
 #### 2. Committed-Use & Sustained-Use Disounts (`committed-use-pricing.json`)
 A multi-node decision graph chaining three evaluation stages:
 1. **CUD Agreement Lookup:** Looks up committed VM quota and discount for the tenant (e.g. Acme committed 5 VMs at 40% discount).
-2. **Sustained-Use Tiering:** If running VMs exceed commitment, evaluates monthly utilization % ($\ge 75\%$ gets 20% discount, $\ge 50\%$ gets 10%, etc.).
+2. **Sustained-Use Tiering:** If running VMs exceed commitment, evaluates monthly utilization % (≥ 75% gets 20% discount, ≥ 50% gets 10%, etc.).
 3. **Calculation Expression Node:** Selects CUD rate if within commitment, sustained-use rate if over commitment, or on-demand rate if uncommitted.
 
 See [GoRules Decision Logic & Diagrams](research/gorules-rule-diagrams.md) for full flowcharts and truth tables.
@@ -222,7 +222,9 @@ Each single metering entry is evaluated through the tier ladder independently. U
 ### Mode 2: Cumulative Tiers (`tier_mode = 'cumulative'`)
 Usage accumulates over a specified billing window (`tier_period`, e.g. `'monthly'`, `'5h'`, `'7d'`). The rating engine calculates marginal cost based on prior cumulative consumption:
 
-$$\text{Cost} = \text{applyTieredRate}(\text{prior\_usage} + \text{current\_value}) - \text{applyTieredRate}(\text{prior\_usage})$$
+```
+Cost = applyTieredRate(prior_usage + current_value) - applyTieredRate(prior_usage)
+```
 
 ```sql
 -- Monthly memory tiers: First 20 GiB free, then graduated pricing
