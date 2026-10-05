@@ -211,6 +211,14 @@ type templateRef struct {
 	ID string `json:"id"`
 }
 
+type catalogItemPayload struct {
+	Metadata    metadata    `json:"metadata"`
+	Title       string      `json:"title"`
+	Description string      `json:"description"`
+	Template    templateRef `json:"template"`
+	Published   bool        `json:"published"`
+}
+
 type netAttachment struct {
 	Subnet networkClassRef `json:"subnet"`
 }
@@ -233,7 +241,8 @@ type diskImageRef struct {
 }
 
 type vmSpec struct {
-	Template           templateRef     `json:"template"`
+	Template           *templateRef    `json:"template,omitempty"`
+	CatalogItem        *templateRef    `json:"catalog_item,omitempty"`
 	NetworkAttachments []netAttachment `json:"network_attachments"`
 	BootDisk           bootDisk        `json:"boot_disk"`
 	RunStrategy        string          `json:"run_strategy"`
@@ -292,6 +301,39 @@ type prereqs struct {
 	storageTierID  string
 	diskImageID    string
 	tenant         string
+	catalogItemIDs []string
+	nextCatalog    atomic.Uint64
+}
+
+func createCatalogItem(client *http.Client, base, token, name, templateID string) (string, error) {
+	return doRequest(client, "POST", base+"/api/private/v1/compute_instance_catalog_items", token, catalogItemPayload{
+		Metadata:    metadata{Name: name},
+		Title:       "OSAC Request Generator " + name,
+		Description: "Published compute instance offering created by the OSAC request generator",
+		Template:    templateRef{ID: templateID},
+		Published:   true,
+	})
+}
+
+func seedCatalogItems(client *http.Client, base, token string, p *prereqs, count int) error {
+	if count == 0 {
+		return nil
+	}
+	fmt.Println("Creating published catalog items...")
+	runID := fmt.Sprintf("%x", time.Now().UnixNano())
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("sim-catalog-%s-%02d", runID, i+1)
+		id, err := createCatalogItem(client, base, token, name, p.tplID)
+		if err != nil {
+			return fmt.Errorf("create catalog item %s: %w", name, err)
+		}
+		if id == "" {
+			return fmt.Errorf("create catalog item %s: empty ID in response", name)
+		}
+		p.catalogItemIDs = append(p.catalogItemIDs, id)
+		fmt.Printf("  %s: %s\n", name, id)
+	}
+	return nil
 }
 
 func existingNetworkClassID(err error) string {
@@ -486,22 +528,28 @@ func provision(client *http.Client, base, token, tenant, fabricManager string) (
 
 func createVM(client *http.Client, base, token string, p *prereqs) (string, error) {
 	name := fmt.Sprintf("sim-vm-%04x", rand.Intn(0x10000))
+	spec := vmSpec{
+		NetworkAttachments: []netAttachment{
+			{Subnet: networkClassRef{ID: p.subnetID}},
+		},
+		BootDisk:     bootDisk{SizeGiB: 20, StorageTier: storageTierRef{ID: p.storageTierID}},
+		RunStrategy:  "COMPUTE_INSTANCE_RUN_STRATEGY_ALWAYS",
+		InstanceType: instanceTypeRef{ID: p.instanceTypeID},
+		DiskImage:    diskImageRef{ID: p.diskImageID},
+	}
+	if len(p.catalogItemIDs) == 0 {
+		spec.Template = &templateRef{ID: p.tplID}
+	} else {
+		index := (p.nextCatalog.Add(1) - 1) % uint64(len(p.catalogItemIDs))
+		spec.CatalogItem = &templateRef{ID: p.catalogItemIDs[index]}
+	}
 	return doRequest(client, "POST", base+"/api/private/v1/compute_instances", token, vmPayload{
 		Metadata: metadata{
 			Name:   name,
 			Tenant: p.tenant,
 			Labels: map[string]string{"env": "loadtest"},
 		},
-		Spec: vmSpec{
-			Template: templateRef{ID: p.tplID},
-			NetworkAttachments: []netAttachment{
-				{Subnet: networkClassRef{ID: p.subnetID}},
-			},
-			BootDisk:     bootDisk{SizeGiB: 20, StorageTier: storageTierRef{ID: p.storageTierID}},
-			RunStrategy:  "COMPUTE_INSTANCE_RUN_STRATEGY_ALWAYS",
-			InstanceType: instanceTypeRef{ID: p.instanceTypeID},
-			DiskImage:    diskImageRef{ID: p.diskImageID},
-		},
+		Spec: spec,
 	})
 }
 
@@ -520,12 +568,16 @@ func main() {
 	rate := flag.Float64("rate", 1.0, "target VM lifecycle operations/sec (creates + deletes each count as 1)")
 	workers := flag.Int("workers", 4, "concurrent goroutines")
 	vmCount := flag.Int("vm-count", 10, "target live VM pool size to maintain")
+	catalogItems := flag.Int("catalog-items", 0, "number of published OSAC catalog items to create and cycle through; 0 uses templates directly")
 	duration := flag.Duration("duration", 0, "how long to run; 0 = forever")
 	flag.Parse()
 
 	token := *tokenFlag
 	if token == "" {
 		log.Fatal("OSAC token required: pass -token flag or set OSAC_TOKEN env var")
+	}
+	if *catalogItems < 0 || *catalogItems > 20 {
+		log.Fatal("-catalog-items must be between 0 and 20")
 	}
 
 	fmt.Println("OSAC Request Generator")
@@ -534,6 +586,7 @@ func main() {
 	fmt.Printf("  rate:     %.1f ops/s\n", *rate)
 	fmt.Printf("  workers:  %d\n", *workers)
 	fmt.Printf("  vm-count: %d\n", *vmCount)
+	fmt.Printf("  catalog-items: %d\n", *catalogItems)
 	if *duration > 0 {
 		fmt.Printf("  duration: %s\n", *duration)
 	} else {
@@ -548,6 +601,9 @@ func main() {
 	p, err := provision(client, *target, token, *tenant, *fabricManager)
 	if err != nil {
 		log.Fatalf("provision failed: %v", err)
+	}
+	if err := seedCatalogItems(client, *target, token, p, *catalogItems); err != nil {
+		log.Fatal(err)
 	}
 	fmt.Println()
 

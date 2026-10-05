@@ -254,6 +254,7 @@ func main() {
 
 		mux := http.NewServeMux()
 		api.HandlerFromMux(h, mux)
+		h.RegisterLegacyRoutes(mux)
 		if cfg.DebugDashboard {
 			h.RegisterDebugRoutes(mux)
 		}

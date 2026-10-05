@@ -88,7 +88,7 @@ func TestComputeInstancePayloadUsesCurrentSchema(t *testing.T) {
 	payload, err := json.Marshal(vmPayload{
 		Metadata: metadata{Name: "sim-vm", Tenant: "test"},
 		Spec: vmSpec{
-			Template: templateRef{ID: "template-id"},
+			Template: &templateRef{ID: "template-id"},
 			NetworkAttachments: []netAttachment{
 				{Subnet: networkClassRef{ID: "subnet-id"}},
 			},
@@ -112,5 +112,61 @@ func TestComputeInstancePayloadUsesCurrentSchema(t *testing.T) {
 		if !strings.Contains(body, requiredField) {
 			t.Fatalf("compute instance is missing current field %s: %s", requiredField, body)
 		}
+	}
+}
+
+func TestCreateCatalogItemPublishesTemplateOffering(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/private/v1/compute_instance_catalog_items" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body catalogItemPayload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if body.Metadata.Name != "sim-catalog-01" || body.Template.ID != "template-id" || !body.Published {
+			t.Errorf("unexpected catalog item: %+v", body)
+		}
+		_, _ = w.Write([]byte(`{"id":"catalog-id"}`))
+	}))
+	defer server.Close()
+
+	id, err := createCatalogItem(server.Client(), server.URL, "token", "sim-catalog-01", "template-id")
+	if err != nil || id != "catalog-id" {
+		t.Fatalf("create catalog item: id=%q err=%v", id, err)
+	}
+}
+
+func TestCreateVMCyclesCatalogItemsWithoutTemplate(t *testing.T) {
+	var refs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode VM: %v", err)
+		}
+		var spec map[string]json.RawMessage
+		if err := json.Unmarshal(body["spec"], &spec); err != nil {
+			t.Errorf("decode VM spec: %v", err)
+		}
+		if _, ok := spec["template"]; ok {
+			t.Errorf("catalog-backed VM also contains template: %s", spec["template"])
+		}
+		var ref templateRef
+		if err := json.Unmarshal(spec["catalog_item"], &ref); err != nil {
+			t.Errorf("decode catalog ref: %v", err)
+		}
+		refs = append(refs, ref.ID)
+		_, _ = w.Write([]byte(`{"id":"vm-id"}`))
+	}))
+	defer server.Close()
+
+	p := &prereqs{catalogItemIDs: []string{"item-1", "item-2"}}
+	for range 3 {
+		if _, err := createVM(server.Client(), server.URL, "token", p); err != nil {
+			t.Fatalf("create VM: %v", err)
+		}
+	}
+	if got := strings.Join(refs, ","); got != "item-1,item-2,item-1" {
+		t.Fatalf("catalog refs = %s, want round-robin order", got)
 	}
 }

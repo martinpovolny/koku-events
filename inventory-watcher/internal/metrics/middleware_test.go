@@ -24,6 +24,14 @@ func TestNormalizePath(t *testing.T) {
 		{"/healthz", "/healthz"},
 		{"/readyz", "/readyz"},
 		{"/debug/dashboard", "/debug/dashboard"},
+		{"/ui", "/ui"},
+		{"/ui/rates", "/ui/rates"},
+		{"/ui/reports", "/ui/reports"},
+		{"/ui/dashboard", "/ui/dashboard"},
+		{"/reports", "/reports"},
+		{"/rates", "/rates"},
+		{"/api/v1/catalog", "/api/v1/catalog"},
+		{"/api/v1/rates", "/api/v1/rates"},
 		{"/", "/"},
 
 		// Parameterized paths normalized

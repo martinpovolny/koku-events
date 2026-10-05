@@ -91,8 +91,9 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/healthz", "/readyz", "/debug/dashboard", "/reports", "/":
+		if r.URL.Path == "/" || r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/") ||
+			r.URL.Path == "/healthz" || r.URL.Path == "/readyz" ||
+			r.URL.Path == "/reports" || r.URL.Path == "/rates" || r.URL.Path == "/debug/dashboard" {
 			next.ServeHTTP(w, r)
 			return
 		}

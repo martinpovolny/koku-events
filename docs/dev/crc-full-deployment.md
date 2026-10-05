@@ -586,11 +586,12 @@ spec:
               value: ":8020"
             # The OSAC adapter is the event source for runtime workloads.
             # Keep the gRPC watcher disabled. Run the reconciler selectively
-            # for catalog and tenancy metadata as an interim bridge until OSAC-3876.
+            # for catalog metadata as an interim bridge until OSAC-3876.
+            # This CRC OSAC build does not expose tenant/project list endpoints.
             - name: DISABLE_COMPONENTS
               value: "watcher"
             - name: RECONCILE_ENTITIES
-              value: "catalog_items,instance_types,tenants,projects"
+              value: "catalog_items,instance_types"
             - name: LOG_FORMAT
               value: "json"
             - name: LOG_LEVEL
