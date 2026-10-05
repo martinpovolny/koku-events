@@ -2038,18 +2038,23 @@ func (h *APIHandler) GetRatesUI(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(ratesHTML))
 }
 
-// RegisterDebugRoutes registers backwards-compatible redirects for legacy UI paths:
+// RegisterLegacyRoutes registers backwards-compatible redirects for legacy UI paths:
 //   - GET /reports -> /ui/reports
 //   - GET /rates -> /ui/rates
-//   - GET /debug/dashboard -> /ui/dashboard
-// Note: GET / and GET /ui are handled by HandlerFromMux via ServerInterface.
-func (h *APIHandler) RegisterDebugRoutes(mux *http.ServeMux) {
+// These are always registered so existing bookmarks and links continue to work
+// regardless of whether the debug dashboard is enabled.
+func (h *APIHandler) RegisterLegacyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /reports", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/reports", http.StatusMovedPermanently)
 	})
 	mux.HandleFunc("GET /rates", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/rates", http.StatusMovedPermanently)
 	})
+}
+
+// RegisterDebugRoutes registers debug-only routes (e.g. legacy redirect for debug dashboard).
+// Only called when DEBUG_DASHBOARD is enabled.
+func (h *APIHandler) RegisterDebugRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /debug/dashboard", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/dashboard", http.StatusMovedPermanently)
 	})

@@ -2449,43 +2449,65 @@ func TestGetRatesUI(t *testing.T) {
 
 func TestUIRoutesAndRedirects(t *testing.T) {
 	h := api.NewAPIHandler(nil, nil, nil, nil, testLogger)
-	mux := http.NewServeMux()
-	api.HandlerFromMux(h, mux)
-	h.RegisterDebugRoutes(mux)
 
-	tests := []struct {
-		path         string
-		wantStatus   int
-		wantLocation string
-	}{
-		{path: "/", wantStatus: http.StatusOK},
-		{path: "/ui", wantStatus: http.StatusOK},
-		{path: "/ui/rates", wantStatus: http.StatusOK},
-		{path: "/ui/reports", wantStatus: http.StatusOK},
-		{path: "/ui/dashboard", wantStatus: http.StatusOK},
-		{path: "/rates", wantStatus: http.StatusMovedPermanently, wantLocation: "/ui/rates"},
-		{path: "/reports", wantStatus: http.StatusMovedPermanently, wantLocation: "/ui/reports"},
-		{path: "/debug/dashboard", wantStatus: http.StatusMovedPermanently, wantLocation: "/ui/dashboard"},
-	}
+	t.Run("without debug dashboard", func(t *testing.T) {
+		mux := http.NewServeMux()
+		api.HandlerFromMux(h, mux)
+		h.RegisterLegacyRoutes(mux)
 
-	for _, tc := range tests {
-		t.Run(tc.path, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
+		tests := []struct {
+			path         string
+			wantStatus   int
+			wantLocation string
+		}{
+			{path: "/", wantStatus: http.StatusOK},
+			{path: "/ui", wantStatus: http.StatusOK},
+			{path: "/ui/rates", wantStatus: http.StatusOK},
+			{path: "/ui/reports", wantStatus: http.StatusOK},
+			{path: "/ui/dashboard", wantStatus: http.StatusOK},
+			{path: "/rates", wantStatus: http.StatusMovedPermanently, wantLocation: "/ui/rates"},
+			{path: "/reports", wantStatus: http.StatusMovedPermanently, wantLocation: "/ui/reports"},
+			{path: "/debug/dashboard", wantStatus: http.StatusNotFound},
+		}
 
-			resp := w.Result()
-			if resp.StatusCode != tc.wantStatus {
-				t.Errorf("GET %s status = %d; want %d", tc.path, resp.StatusCode, tc.wantStatus)
-			}
-			if tc.wantLocation != "" {
-				loc := resp.Header.Get("Location")
-				if loc != tc.wantLocation {
-					t.Errorf("GET %s Location = %q; want %q", tc.path, loc, tc.wantLocation)
+		for _, tc := range tests {
+			t.Run(tc.path, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, req)
+
+				resp := w.Result()
+				if resp.StatusCode != tc.wantStatus {
+					t.Errorf("GET %s status = %d; want %d", tc.path, resp.StatusCode, tc.wantStatus)
 				}
-			}
-		})
-	}
+				if tc.wantLocation != "" {
+					loc := resp.Header.Get("Location")
+					if loc != tc.wantLocation {
+						t.Errorf("GET %s Location = %q; want %q", tc.path, loc, tc.wantLocation)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("with debug dashboard enabled", func(t *testing.T) {
+		mux := http.NewServeMux()
+		api.HandlerFromMux(h, mux)
+		h.RegisterLegacyRoutes(mux)
+		h.RegisterDebugRoutes(mux)
+
+		req := httptest.NewRequest(http.MethodGet, "/debug/dashboard", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		resp := w.Result()
+		if resp.StatusCode != http.StatusMovedPermanently {
+			t.Errorf("GET /debug/dashboard status = %d; want %d", resp.StatusCode, http.StatusMovedPermanently)
+		}
+		if loc := resp.Header.Get("Location"); loc != "/ui/dashboard" {
+			t.Errorf("GET /debug/dashboard Location = %q; want /ui/dashboard", loc)
+		}
+	})
 }
 
 func TestCreateRate_Validation(t *testing.T) {
