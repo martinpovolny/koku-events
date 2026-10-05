@@ -2165,6 +2165,50 @@ func TestProcessKafkaEvent_OSACv1ResourceCreated(t *testing.T) {
 	}
 }
 
+func TestProcessKafkaEvent_OSACv1PreservesCatalogAndMachineDimensions(t *testing.T) {
+	ctx := context.Background()
+	h := api.NewAPIHandler(testStore, testMeter, nil, nil, testLogger)
+
+	ts := time.Now().UnixNano()
+	resourceID := fmt.Sprintf("vm-osac-catalog-%d", ts)
+	payload := fmt.Sprintf(`{
+		"specversion": "1.0",
+		"id": "evt-osac-catalog-%d",
+		"source": "osac-metering",
+		"type": "osac.resource.created.v1",
+		"time": "%s",
+		"osacresourceid": "%s",
+		"osacresourcetype": "compute_instance",
+		"osactenant": "test-tenant-catalog",
+		"data": {
+			"resource_id": "%s",
+			"resource_type": "compute_instance",
+			"tenant_id": "test-tenant-catalog",
+			"catalog_item_id": "catalog-sku-123",
+			"current_state": "RUNNING",
+			"transition_time": "%s",
+			"billing_dimensions": {"instance_type": "standard-4-8"},
+			"schema_version": "v1"
+		}
+	}`, ts, time.Now().UTC().Format(time.RFC3339), resourceID,
+		resourceID, time.Now().UTC().Format(time.RFC3339Nano))
+
+	if err := h.ProcessKafkaEvent(ctx, "osac.metering.lifecycle", []byte(payload)); err != nil {
+		t.Fatalf("ProcessKafkaEvent failed: %v", err)
+	}
+
+	ci, err := testStore.GetComputeInstance(ctx, resourceID)
+	if err != nil {
+		t.Fatalf("GetComputeInstance failed: %v", err)
+	}
+	if ci.InstanceType != "standard-4-8" {
+		t.Fatalf("instance_type: got %q, want standard-4-8", ci.InstanceType)
+	}
+	if ci.CatalogItem != "catalog-sku-123" {
+		t.Fatalf("catalog_item: got %q, want catalog-sku-123", ci.CatalogItem)
+	}
+}
+
 func TestProcessKafkaEvent_OSACv1ResourceDeleted(t *testing.T) {
 	ctx := context.Background()
 	h := api.NewAPIHandler(testStore, testMeter, nil, nil, testLogger)

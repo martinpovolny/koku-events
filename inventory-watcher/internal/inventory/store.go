@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS inventory_compute_instance (
     project        TEXT NOT NULL DEFAULT '',
     cluster_id     TEXT NOT NULL DEFAULT '',
     instance_type  TEXT NOT NULL DEFAULT '',
+    catalog_item   TEXT NOT NULL DEFAULT '',
     cores          INTEGER NOT NULL DEFAULT 0,
     memory_gib     INTEGER NOT NULL DEFAULT 0,
     state          TEXT NOT NULL DEFAULT '',
@@ -344,8 +345,11 @@ ALTER TABLE rates ADD COLUMN IF NOT EXISTS effective_to TIMESTAMPTZ;
 -- instance_type dimension on rates and metering for per-SKU pricing (REQ-3b)
 ALTER TABLE rates ADD COLUMN IF NOT EXISTS instance_type TEXT NOT NULL DEFAULT '';
 ALTER TABLE metering_entries ADD COLUMN IF NOT EXISTS instance_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE rates ADD COLUMN IF NOT EXISTS catalog_item TEXT NOT NULL DEFAULT '';
+ALTER TABLE metering_entries ADD COLUMN IF NOT EXISTS catalog_item TEXT NOT NULL DEFAULT '';
+ALTER TABLE inventory_compute_instance ADD COLUMN IF NOT EXISTS catalog_item TEXT NOT NULL DEFAULT '';
 DROP INDEX IF EXISTS idx_rates_lookup;
-CREATE INDEX IF NOT EXISTS idx_rates_lookup ON rates (resource_type, instance_type, meter_name, effective_from);
+CREATE INDEX IF NOT EXISTS idx_rates_lookup ON rates (resource_type, catalog_item, instance_type, meter_name, effective_from);
 
 -- Drop the unique index on raw_events.event_id if it exists from an older
 -- schema. The unique check was 33% of ingest handler time (profiled).
@@ -506,10 +510,10 @@ func (s *Store) InsertRawEvent(ctx context.Context, ev RawEvent) (bool, error) {
 func (s *Store) InsertMeteringEntry(ctx context.Context, entry MeteringEntry) error {
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO metering_entries
-			(raw_event_id, resource_type, resource_id, tenant_id, project_id, user_id, instance_type, meter_name, value, unit, period_start, period_end)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			(raw_event_id, resource_type, resource_id, tenant_id, project_id, user_id, instance_type, catalog_item, meter_name, value, unit, period_start, period_end)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`, entry.RawEventID, entry.ResourceType, entry.ResourceID, entry.TenantID,
-		entry.ProjectID, entry.UserID, entry.InstanceType, entry.MeterName, entry.Value, entry.Unit, entry.PeriodStart, entry.PeriodEnd)
+		entry.ProjectID, entry.UserID, entry.InstanceType, entry.CatalogItem, entry.MeterName, entry.Value, entry.Unit, entry.PeriodStart, entry.PeriodEnd)
 
 	if err != nil {
 		return fmt.Errorf("insert metering entry %s/%s: %w", entry.ResourceID, entry.MeterName, err)
@@ -525,17 +529,17 @@ func (s *Store) InsertMeteringEntryBatch(ctx context.Context, entries []Metering
 		return s.InsertMeteringEntry(ctx, entries[0])
 	}
 
-	query := "INSERT INTO metering_entries (raw_event_id, resource_type, resource_id, tenant_id, project_id, user_id, instance_type, meter_name, value, unit, period_start, period_end) VALUES "
-	args := make([]interface{}, 0, len(entries)*12)
+	query := "INSERT INTO metering_entries (raw_event_id, resource_type, resource_id, tenant_id, project_id, user_id, instance_type, catalog_item, meter_name, value, unit, period_start, period_end) VALUES "
+	args := make([]interface{}, 0, len(entries)*13)
 	for i, e := range entries {
 		if i > 0 {
 			query += ", "
 		}
-		base := i * 12
-		query += fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
-			base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9, base+10, base+11, base+12)
+		base := i * 13
+		query += fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9, base+10, base+11, base+12, base+13)
 		args = append(args, e.RawEventID, e.ResourceType, e.ResourceID,
-			e.TenantID, e.ProjectID, e.UserID, e.InstanceType, e.MeterName, e.Value, e.Unit, e.PeriodStart, e.PeriodEnd)
+			e.TenantID, e.ProjectID, e.UserID, e.InstanceType, e.CatalogItem, e.MeterName, e.Value, e.Unit, e.PeriodStart, e.PeriodEnd)
 	}
 	_, err := s.db.Exec(ctx, query, args...)
 	if err != nil {
@@ -547,7 +551,7 @@ func (s *Store) InsertMeteringEntryBatch(ctx context.Context, entries []Metering
 // BillableComputeInstances returns alive compute instances in billable states.
 func (s *Store) BillableComputeInstances(ctx context.Context) ([]ComputeInstanceRecord, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT instance_id, name, tenant, project, cluster_id, instance_type, cores, memory_gib, state, labels,
+		SELECT instance_id, name, tenant, project, cluster_id, instance_type, catalog_item, cores, memory_gib, state, labels,
 		       created_at, deleted_at, last_event_id, last_updated, last_metered_at
 		FROM inventory_compute_instance
 		WHERE deleted_at IS NULL AND state IN ('COMPUTE_INSTANCE_STATE_RUNNING', 'RUNNING')
@@ -561,7 +565,7 @@ func (s *Store) BillableComputeInstances(ctx context.Context) ([]ComputeInstance
 	for rows.Next() {
 		var r ComputeInstanceRecord
 		if err := rows.Scan(&r.InstanceID, &r.Name, &r.Tenant, &r.Project, &r.ClusterID,
-			&r.InstanceType, &r.Cores, &r.MemoryGiB, &r.State, &r.Labels,
+			&r.InstanceType, &r.CatalogItem, &r.Cores, &r.MemoryGiB, &r.State, &r.Labels,
 			&r.CreatedAt, &r.DeletedAt, &r.LastEventID, &r.LastUpdated, &r.LastMeteredAt); err != nil {
 			return nil, err
 		}
@@ -582,11 +586,11 @@ func (s *Store) UpdateComputeInstanceLastMetered(ctx context.Context, instanceID
 func (s *Store) GetComputeInstance(ctx context.Context, instanceID string) (*ComputeInstanceRecord, error) {
 	var r ComputeInstanceRecord
 	err := s.db.QueryRow(ctx, `
-		SELECT instance_id, name, tenant, project, cluster_id, instance_type, cores, memory_gib, state, labels,
+		SELECT instance_id, name, tenant, project, cluster_id, instance_type, catalog_item, cores, memory_gib, state, labels,
 		       created_at, deleted_at, last_event_id, last_updated, last_metered_at
 		FROM inventory_compute_instance WHERE instance_id = $1
 	`, instanceID).Scan(&r.InstanceID, &r.Name, &r.Tenant, &r.Project, &r.ClusterID,
-		&r.InstanceType, &r.Cores, &r.MemoryGiB, &r.State, &r.Labels,
+		&r.InstanceType, &r.CatalogItem, &r.Cores, &r.MemoryGiB, &r.State, &r.Labels,
 		&r.CreatedAt, &r.DeletedAt, &r.LastEventID, &r.LastUpdated, &r.LastMeteredAt)
 	if err != nil {
 		return nil, err
@@ -897,14 +901,15 @@ func (s *Store) UpsertComputeInstance(ctx context.Context, rec ComputeInstanceRe
 
 	_, err = s.db.Exec(ctx, `
 		INSERT INTO inventory_compute_instance
-			(instance_id, name, tenant, project, cluster_id, instance_type, cores, memory_gib, state, labels, created_at, deleted_at, last_event_id, last_updated)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+			(instance_id, name, tenant, project, cluster_id, instance_type, catalog_item, cores, memory_gib, state, labels, created_at, deleted_at, last_event_id, last_updated)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
 		ON CONFLICT (instance_id) DO UPDATE SET
 			name = EXCLUDED.name,
 			tenant = EXCLUDED.tenant,
 			project = EXCLUDED.project,
 			cluster_id = EXCLUDED.cluster_id,
 			instance_type = EXCLUDED.instance_type,
+			catalog_item = EXCLUDED.catalog_item,
 			cores = EXCLUDED.cores,
 			memory_gib = EXCLUDED.memory_gib,
 			state = EXCLUDED.state,
@@ -913,7 +918,7 @@ func (s *Store) UpsertComputeInstance(ctx context.Context, rec ComputeInstanceRe
 			last_event_id = EXCLUDED.last_event_id,
 			last_updated = NOW()
 	`, rec.InstanceID, rec.Name, rec.Tenant, rec.Project, rec.ClusterID,
-		rec.InstanceType, rec.Cores, rec.MemoryGiB, rec.State, labelsJSON,
+		rec.InstanceType, rec.CatalogItem, rec.Cores, rec.MemoryGiB, rec.State, labelsJSON,
 		rec.CreatedAt, rec.DeletedAt, rec.LastEventID)
 
 	if err != nil {
@@ -1100,7 +1105,7 @@ func (s *Store) ListAllCatalogItems(ctx context.Context) ([]CatalogItemRecord, e
 // ListAliveComputeInstances returns all compute instances not yet deleted.
 func (s *Store) ListAliveComputeInstances(ctx context.Context) ([]ComputeInstanceRecord, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT instance_id, name, tenant, project, cluster_id, instance_type, cores, memory_gib, state, labels,
+		SELECT instance_id, name, tenant, project, cluster_id, instance_type, catalog_item, cores, memory_gib, state, labels,
 		       created_at, deleted_at, last_event_id, last_updated, last_metered_at
 		FROM inventory_compute_instance WHERE deleted_at IS NULL
 	`)
@@ -1113,7 +1118,7 @@ func (s *Store) ListAliveComputeInstances(ctx context.Context) ([]ComputeInstanc
 	for rows.Next() {
 		var r ComputeInstanceRecord
 		if err := rows.Scan(&r.InstanceID, &r.Name, &r.Tenant, &r.Project, &r.ClusterID,
-			&r.InstanceType, &r.Cores, &r.MemoryGiB, &r.State, &r.Labels,
+			&r.InstanceType, &r.CatalogItem, &r.Cores, &r.MemoryGiB, &r.State, &r.Labels,
 			&r.CreatedAt, &r.DeletedAt, &r.LastEventID, &r.LastUpdated, &r.LastMeteredAt); err != nil {
 			return nil, err
 		}
@@ -1147,7 +1152,7 @@ func (s *Store) ListAliveClusters(ctx context.Context) ([]ClusterRecord, error) 
 }
 
 // UpsertRate inserts a rate definition. If an active rate exists with the identical
-// matching dimensions (tenant_id, resource_type, instance_type, meter_name), it retires
+// matching dimensions (tenant_id, resource_type, catalog_item, instance_type, meter_name), it retires
 // the older active rate by setting its effective_to to the new rate's effective_from (or NOW).
 func (s *Store) UpsertRate(ctx context.Context, rec RateRecord) (int64, error) {
 	if rec.EffectiveFrom.IsZero() {
@@ -1177,22 +1182,22 @@ func (s *Store) UpsertRate(ctx context.Context, rec RateRecord) (int64, error) {
 		retireQuery = `
 			UPDATE rates
 			SET effective_to = $1
-			WHERE resource_type = $2 AND meter_name = $3 AND instance_type = $4
-			  AND tenant_id = $5
+			WHERE resource_type = $2 AND meter_name = $3 AND catalog_item = $4 AND instance_type = $5
+			  AND tenant_id = $6
 			  AND effective_from < $1
 			  AND (effective_to IS NULL OR effective_to > $1)
 		`
-		retireArgs = []any{rec.EffectiveFrom, rec.ResourceType, rec.MeterName, rec.InstanceType, *rec.TenantID}
+		retireArgs = []any{rec.EffectiveFrom, rec.ResourceType, rec.MeterName, rec.CatalogItem, rec.InstanceType, *rec.TenantID}
 	} else {
 		retireQuery = `
 			UPDATE rates
 			SET effective_to = $1
-			WHERE resource_type = $2 AND meter_name = $3 AND instance_type = $4
+			WHERE resource_type = $2 AND meter_name = $3 AND catalog_item = $4 AND instance_type = $5
 			  AND (tenant_id IS NULL OR tenant_id = '')
 			  AND effective_from < $1
 			  AND (effective_to IS NULL OR effective_to > $1)
 		`
-		retireArgs = []any{rec.EffectiveFrom, rec.ResourceType, rec.MeterName, rec.InstanceType}
+		retireArgs = []any{rec.EffectiveFrom, rec.ResourceType, rec.MeterName, rec.CatalogItem, rec.InstanceType}
 	}
 	if _, err := tx.Exec(ctx, retireQuery, retireArgs...); err != nil {
 		return 0, fmt.Errorf("retire matching rates: %w", err)
@@ -1201,10 +1206,10 @@ func (s *Store) UpsertRate(ctx context.Context, rec RateRecord) (int64, error) {
 	var id int64
 	err = tx.QueryRow(ctx, `
 		INSERT INTO rates
-			(tenant_id, resource_type, instance_type, meter_name, koku_metric, cost_type, price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			(tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type, price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id
-	`, rec.TenantID, rec.ResourceType, rec.InstanceType, rec.MeterName, rec.KokuMetric, rec.CostType,
+	`, rec.TenantID, rec.ResourceType, rec.CatalogItem, rec.InstanceType, rec.MeterName, rec.KokuMetric, rec.CostType,
 		rec.PricePerUnit, rec.Currency, tiersJSON, rec.TierMode, rec.TierPeriod, rec.Description,
 		rec.EffectiveFrom, rec.EffectiveTo).Scan(&id)
 
@@ -1223,12 +1228,12 @@ func (s *Store) GetRate(ctx context.Context, id int64) (*RateRecord, error) {
 	var tiersJSON []byte
 
 	err := s.db.QueryRow(ctx, `
-		SELECT id, tenant_id, resource_type, instance_type, meter_name, koku_metric, cost_type,
+		SELECT id, tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type,
 		       price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to
 		FROM rates
 		WHERE id = $1
 	`, id).Scan(
-		&rec.ID, &rec.TenantID, &rec.ResourceType, &rec.InstanceType, &rec.MeterName,
+		&rec.ID, &rec.TenantID, &rec.ResourceType, &rec.CatalogItem, &rec.InstanceType, &rec.MeterName,
 		&rec.KokuMetric, &rec.CostType,
 		&rec.PricePerUnit, &rec.Currency, &tiersJSON, &rec.TierMode, &rec.TierPeriod, &rec.Description,
 		&rec.EffectiveFrom, &rec.EffectiveTo)
@@ -1261,24 +1266,26 @@ func (s *Store) DeleteRate(ctx context.Context, id int64) (bool, error) {
 
 // FindRate looks up the applicable rate for a meter. Prefers tenant-specific
 // and instance-type-specific rates over global defaults.
-func (s *Store) FindRate(ctx context.Context, tenantID, resourceType, instanceType, meterName string, at time.Time) (*RateRecord, error) {
+func (s *Store) FindRate(ctx context.Context, tenantID, resourceType, catalogItem, instanceType, meterName string, at time.Time) (*RateRecord, error) {
 	var rec RateRecord
 	var tiersJSON []byte
 
 	err := s.db.QueryRow(ctx, `
-		SELECT id, tenant_id, resource_type, instance_type, meter_name, koku_metric, cost_type,
+		SELECT id, tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type,
 		       price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to
 		FROM rates
 		WHERE resource_type = $1 AND meter_name = $2
 		  AND effective_from <= $3
 		  AND (effective_to IS NULL OR effective_to > $3)
 		  AND (tenant_id = $4 OR tenant_id IS NULL OR tenant_id = '')
-		  AND (instance_type = $5 OR instance_type = '')
+		  AND (catalog_item = $5 OR catalog_item = '')
+		  AND (instance_type = $6 OR instance_type = '')
 		ORDER BY CASE WHEN tenant_id = $4 THEN 0 ELSE 1 END,
-		         CASE WHEN instance_type = $5 THEN 0 ELSE 1 END
+		         CASE WHEN catalog_item = $5 THEN 0 ELSE 1 END,
+		         CASE WHEN instance_type = $6 THEN 0 ELSE 1 END
 		LIMIT 1
-	`, resourceType, meterName, at, tenantID, instanceType).Scan(
-		&rec.ID, &rec.TenantID, &rec.ResourceType, &rec.InstanceType, &rec.MeterName,
+	`, resourceType, meterName, at, tenantID, catalogItem, instanceType).Scan(
+		&rec.ID, &rec.TenantID, &rec.ResourceType, &rec.CatalogItem, &rec.InstanceType, &rec.MeterName,
 		&rec.KokuMetric, &rec.CostType,
 		&rec.PricePerUnit, &rec.Currency, &tiersJSON, &rec.TierMode, &rec.TierPeriod, &rec.Description,
 		&rec.EffectiveFrom, &rec.EffectiveTo)
@@ -1301,7 +1308,7 @@ func (s *Store) FindRate(ctx context.Context, tenantID, resourceType, instanceTy
 func (s *Store) UnratedMeteringEntries(ctx context.Context, limit int) ([]MeteringEntry, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id, raw_event_id, resource_type, resource_id, tenant_id,
-		       project_id, user_id, instance_type, meter_name, value, unit, period_start, period_end
+		       project_id, user_id, instance_type, catalog_item, meter_name, value, unit, period_start, period_end
 		FROM metering_entries
 		WHERE rated_at IS NULL
 		ORDER BY id
@@ -1316,7 +1323,7 @@ func (s *Store) UnratedMeteringEntries(ctx context.Context, limit int) ([]Meteri
 	for rows.Next() {
 		var r MeteringEntry
 		if err := rows.Scan(&r.ID, &r.RawEventID, &r.ResourceType, &r.ResourceID,
-			&r.TenantID, &r.ProjectID, &r.UserID, &r.InstanceType, &r.MeterName, &r.Value, &r.Unit, &r.PeriodStart, &r.PeriodEnd); err != nil {
+			&r.TenantID, &r.ProjectID, &r.UserID, &r.InstanceType, &r.CatalogItem, &r.MeterName, &r.Value, &r.Unit, &r.PeriodStart, &r.PeriodEnd); err != nil {
 			return nil, err
 		}
 		results = append(results, r)
@@ -1337,7 +1344,7 @@ func (s *Store) MarkMeteringEntriesRated(ctx context.Context, ids []int64) error
 // AllActiveRates returns all rates currently in effect.
 func (s *Store) AllActiveRates(ctx context.Context, at time.Time) ([]RateRecord, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, tenant_id, resource_type, instance_type, meter_name, koku_metric, cost_type,
+		SELECT id, tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type,
 		       price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to
 		FROM rates
 		WHERE effective_from <= $1
@@ -1353,7 +1360,7 @@ func (s *Store) AllActiveRates(ctx context.Context, at time.Time) ([]RateRecord,
 	for rows.Next() {
 		var r RateRecord
 		var tiersJSON []byte
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.ResourceType, &r.InstanceType, &r.MeterName,
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.ResourceType, &r.CatalogItem, &r.InstanceType, &r.MeterName,
 			&r.KokuMetric, &r.CostType, &r.PricePerUnit, &r.Currency, &tiersJSON,
 			&r.TierMode, &r.TierPeriod, &r.Description, &r.EffectiveFrom, &r.EffectiveTo); err != nil {
 			return nil, err
@@ -1370,7 +1377,7 @@ func (s *Store) AllActiveRates(ctx context.Context, at time.Time) ([]RateRecord,
 
 // ListRates returns all rates, optionally filtered by tenant_id.
 func (s *Store) ListRates(ctx context.Context, tenantID string) ([]RateRecord, error) {
-	q := `SELECT id, tenant_id, resource_type, instance_type, meter_name, koku_metric, cost_type,
+	q := `SELECT id, tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type,
 	             price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to
 	      FROM rates`
 
@@ -1379,7 +1386,7 @@ func (s *Store) ListRates(ctx context.Context, tenantID string) ([]RateRecord, e
 		q += ` WHERE tenant_id = $1 OR tenant_id IS NULL OR tenant_id = ''`
 		args = append(args, tenantID)
 	}
-	q += ` ORDER BY resource_type, meter_name, instance_type`
+	q += ` ORDER BY resource_type, meter_name, catalog_item, instance_type`
 
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
@@ -1391,7 +1398,7 @@ func (s *Store) ListRates(ctx context.Context, tenantID string) ([]RateRecord, e
 	for rows.Next() {
 		var r RateRecord
 		var tiersJSON []byte
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.ResourceType, &r.InstanceType, &r.MeterName,
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.ResourceType, &r.CatalogItem, &r.InstanceType, &r.MeterName,
 			&r.KokuMetric, &r.CostType, &r.PricePerUnit, &r.Currency, &tiersJSON,
 			&r.TierMode, &r.TierPeriod, &r.Description, &r.EffectiveFrom, &r.EffectiveTo); err != nil {
 			return nil, err

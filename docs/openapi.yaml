@@ -2003,9 +2003,15 @@ components:
         instance_type:
           type: string
           description: >-
-            Instance type filter. Empty string means the rate applies
-            to all instance types.
+            Machine instance type filter. Empty string means the rate applies
+            to all machine types.
           example: ""
+        catalog_item:
+          type: string
+          description: >-
+            OSAC catalog item name or SKU filter. Empty string means the rate
+            applies to all catalog items.
+          example: sim-catalog-standard
         meter_name:
           type: string
           description: Meter name this rate applies to
@@ -2085,8 +2091,13 @@ components:
         instance_type:
           type: string
           default: ""
-          description: Instance type or catalog item SKU to match (empty string matches any)
+          description: Machine instance type to match (empty string matches any machine type)
           example: standard-4-16
+        catalog_item:
+          type: string
+          default: ""
+          description: OSAC catalog item name or SKU to match (empty string matches any catalog item)
+          example: sim-catalog-standard
         meter_name:
           type: string
           description: Meter name to match (e.g. vm_uptime_seconds)

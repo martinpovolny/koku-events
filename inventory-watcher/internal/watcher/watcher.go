@@ -255,6 +255,7 @@ func (w *Watcher) upsertComputeInstance(ctx context.Context, eventID string, ci 
 		Name:         ci.Metadata.Name,
 		Tenant:       ci.Metadata.Tenant,
 		InstanceType: ci.Spec.InstanceType.ID,
+		CatalogItem:  ci.Spec.CatalogItem.Name,
 		Cores:        cores,
 		MemoryGiB:    memGiB,
 		State:        ci.Status.State,

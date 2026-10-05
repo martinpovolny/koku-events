@@ -33,6 +33,7 @@ type ComputeInstanceRecord struct {
 	Project       string          `json:"project"`
 	ClusterID     string          `json:"cluster_id"`
 	InstanceType  string          `json:"instance_type"`
+	CatalogItem   string          `json:"catalog_item"`
 	Cores         int32           `json:"cores"`
 	MemoryGiB     int32           `json:"memory_gib"`
 	State         string          `json:"state"`
@@ -131,6 +132,7 @@ type MeteringEntry struct {
 	ProjectID    string    `json:"project_id"`
 	UserID       string    `json:"user_id"`
 	InstanceType string    `json:"instance_type"`
+	CatalogItem  string    `json:"catalog_item"`
 	MeterName    string    `json:"meter_name"`
 	Value        float64   `json:"value"`
 	Unit         string    `json:"unit"`
@@ -144,38 +146,39 @@ type Tier struct {
 }
 
 type RateRecord struct {
-	ID            int64      `json:"id"`
-	TenantID      *string    `json:"tenant_id"`
-	ResourceType  string     `json:"resource_type"`
-	InstanceType  string     `json:"instance_type"`
-	MeterName     string     `json:"meter_name"`
-	KokuMetric    string     `json:"koku_metric"`
-	CostType      string     `json:"cost_type"`
+	ID            int64           `json:"id"`
+	TenantID      *string         `json:"tenant_id"`
+	ResourceType  string          `json:"resource_type"`
+	InstanceType  string          `json:"instance_type"`
+	CatalogItem   string          `json:"catalog_item"`
+	MeterName     string          `json:"meter_name"`
+	KokuMetric    string          `json:"koku_metric"`
+	CostType      string          `json:"cost_type"`
 	PricePerUnit  decimal.Decimal `json:"price_per_unit"`
-	Currency      string         `json:"currency"`
-	Tiers         []Tier         `json:"tiers"`
-	TierMode      string         `json:"tier_mode"`
-	TierPeriod    string     `json:"tier_period"`
-	Description   string     `json:"description"`
-	EffectiveFrom time.Time  `json:"effective_from"`
-	EffectiveTo   *time.Time `json:"effective_to"`
+	Currency      string          `json:"currency"`
+	Tiers         []Tier          `json:"tiers"`
+	TierMode      string          `json:"tier_mode"`
+	TierPeriod    string          `json:"tier_period"`
+	Description   string          `json:"description"`
+	EffectiveFrom time.Time       `json:"effective_from"`
+	EffectiveTo   *time.Time      `json:"effective_to"`
 }
 
 type CostEntry struct {
-	ID              int64     `json:"id"`
-	MeteringEntryID int64     `json:"metering_entry_id"`
-	RateID          int64     `json:"rate_id"`
-	TenantID        string    `json:"tenant_id"`
-	ProjectID       string    `json:"project_id"`
-	UserID          string    `json:"user_id"`
-	ResourceType    string    `json:"resource_type"`
-	ResourceID      string    `json:"resource_id"`
-	MeterName       string    `json:"meter_name"`
+	ID              int64           `json:"id"`
+	MeteringEntryID int64           `json:"metering_entry_id"`
+	RateID          int64           `json:"rate_id"`
+	TenantID        string          `json:"tenant_id"`
+	ProjectID       string          `json:"project_id"`
+	UserID          string          `json:"user_id"`
+	ResourceType    string          `json:"resource_type"`
+	ResourceID      string          `json:"resource_id"`
+	MeterName       string          `json:"meter_name"`
 	MeteredValue    float64         `json:"metered_value"`
 	CostAmount      decimal.Decimal `json:"cost_amount"`
-	Currency        string    `json:"currency"`
-	PeriodStart     time.Time `json:"period_start"`
-	PeriodEnd       time.Time `json:"period_end"`
+	Currency        string          `json:"currency"`
+	PeriodStart     time.Time       `json:"period_start"`
+	PeriodEnd       time.Time       `json:"period_end"`
 	WalletApplied   decimal.Decimal `json:"wallet_applied"`
 }
 
@@ -196,13 +199,13 @@ type QuotaRecord struct {
 }
 
 type QuotaStatus struct {
-	MeterName  string             `json:"meter_name"`
-	Unit       string             `json:"unit"`
-	Limit      float64            `json:"limit"`
-	Consumed   float64            `json:"consumed"`
-	Percentage float64            `json:"percentage"`
-	Thresholds map[string]bool    `json:"thresholds"`
-	Alerts     []AlertRecord      `json:"alerts,omitempty"`
+	MeterName  string          `json:"meter_name"`
+	Unit       string          `json:"unit"`
+	Limit      float64         `json:"limit"`
+	Consumed   float64         `json:"consumed"`
+	Percentage float64         `json:"percentage"`
+	Thresholds map[string]bool `json:"thresholds"`
+	Alerts     []AlertRecord   `json:"alerts,omitempty"`
 }
 
 type AlertRecord struct {

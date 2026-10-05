@@ -122,7 +122,7 @@ func TestSweep_RatesUnratedEntries(t *testing.T) {
 	// by the cumulative tier integration tests; this test focuses on
 	// flat-rate cost calculation via the store → rate → cost path.
 	now2 := time.Now().UTC()
-	rate, err := testStore.FindRate(ctx, tenantID, "test_resource", "", meterName, now2)
+	rate, err := testStore.FindRate(ctx, tenantID, "test_resource", "", "", meterName, now2)
 	if err != nil || rate == nil {
 		t.Fatalf("FindRate failed: %v (rate=%v)", err, rate)
 	}

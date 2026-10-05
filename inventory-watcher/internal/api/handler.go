@@ -777,6 +777,10 @@ func (h *APIHandler) processOSACComputeInstance(ctx context.Context, ce cloudEve
 	if bd.InstanceType != nil {
 		instanceType = *bd.InstanceType
 	}
+	catalogItem := ""
+	if md.CatalogItemID != nil && *md.CatalogItemID != "" {
+		catalogItem = *md.CatalogItemID
+	}
 
 	project := ""
 	if md.ProjectID != nil {
@@ -789,6 +793,7 @@ func (h *APIHandler) processOSACComputeInstance(ctx context.Context, ce cloudEve
 		Project:      project,
 		State:        state,
 		InstanceType: instanceType,
+		CatalogItem:  catalogItem,
 		CreatedAt:    ce.Time,
 		LastEventID:  ce.ID,
 	}); err != nil {
@@ -969,7 +974,7 @@ func (h *APIHandler) ListRates(w http.ResponseWriter, r *http.Request, params Li
 	if csvFormat {
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", "attachment; filename=rates.csv")
-		fmt.Fprintln(w, "id,tenant_id,resource_type,instance_type,meter_name,cost_type,price_per_unit,currency,tier_mode,tier_period,tiers,description,effective_from,effective_to")
+		fmt.Fprintln(w, "id,tenant_id,resource_type,catalog_item,instance_type,meter_name,cost_type,price_per_unit,currency,tier_mode,tier_period,tiers,description,effective_from,effective_to")
 		for _, rate := range rates {
 			tid := ""
 			if rate.TenantID != nil {
@@ -984,8 +989,8 @@ func (h *APIHandler) ListRates(w http.ResponseWriter, r *http.Request, params Li
 				b, _ := json.Marshal(rate.Tiers)
 				tiersJSON = string(b)
 			}
-			fmt.Fprintf(w, "%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
-				rate.ID, CsvSafe(tid), CsvSafe(rate.ResourceType), CsvSafe(rate.InstanceType),
+			fmt.Fprintf(w, "%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+				rate.ID, CsvSafe(tid), CsvSafe(rate.ResourceType), CsvSafe(rate.CatalogItem), CsvSafe(rate.InstanceType),
 				CsvSafe(rate.MeterName), CsvSafe(rate.CostType), rate.PricePerUnit.String(),
 				CsvSafe(rate.Currency), CsvSafe(rate.TierMode), CsvSafe(rate.TierPeriod),
 				CsvSafe(tiersJSON), CsvSafe(rate.Description),
@@ -1038,6 +1043,10 @@ func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
 	if req.InstanceType != nil {
 		instanceType = *req.InstanceType
 	}
+	catalogItem := ""
+	if req.CatalogItem != nil {
+		catalogItem = *req.CatalogItem
+	}
 	kokuMetric := ""
 	if req.KokuMetric != nil {
 		kokuMetric = *req.KokuMetric
@@ -1086,6 +1095,7 @@ func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
 		TenantID:      tenantID,
 		ResourceType:  req.ResourceType,
 		InstanceType:  instanceType,
+		CatalogItem:   catalogItem,
 		MeterName:     req.MeterName,
 		KokuMetric:    kokuMetric,
 		CostType:      costType,
@@ -2041,6 +2051,7 @@ func (h *APIHandler) GetRatesUI(w http.ResponseWriter, r *http.Request) {
 // RegisterLegacyRoutes registers backwards-compatible redirects for legacy UI paths:
 //   - GET /reports -> /ui/reports
 //   - GET /rates -> /ui/rates
+//
 // These are always registered so existing bookmarks and links continue to work
 // regardless of whether the debug dashboard is enabled.
 func (h *APIHandler) RegisterLegacyRoutes(mux *http.ServeMux) {
