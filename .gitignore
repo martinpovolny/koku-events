@@ -8,6 +8,7 @@
 *.p12
 *.pfx
 RESUME.sh
+docs/dev/crc-deployment-dashboard.html
 
 # Python
 __pycache__/
