@@ -1,0 +1,22 @@
+meta {
+  name: List Rates (CSV)
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/v1/rates?format=csv
+  body: none
+  auth: none
+}
+
+params:query {
+  format: csv
+  ~tenant_id: tenant-acme
+}
+
+docs {
+  ## List Rates (CSV)
+
+  Exports the active rate cards as a CSV spreadsheet.
+}

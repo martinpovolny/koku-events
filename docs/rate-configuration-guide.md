@@ -1,291 +1,354 @@
-# Rate Configuration Guide
+# Rate Configuration & Pricing Guide
 
-How to configure pricing: per-SKU rates, tenant overrides, tiered
-pricing, and MaaS token pricing.
+How pricing works in the Cost Management PoC: rate forms, the two-tier rating architecture, static rate cards, graduated tiers, per-tenant overrides, programmable GoRules decision models, and rate assignment tools.
 
-**See also:** [Metric Calculation Reference](metric-calculation-reference.md) —
-how meters are computed, catalog fallback, and worked examples
-showing the full path from resource to dollar amount.
+**See also:**
+- [Metric Calculation Reference](metric-calculation-reference.md) — how raw meters are computed, catalog fallback, and worked examples from resource to dollar amount.
+- [Cost Calculation Spec Draft](poc_architecture/pricing/cost-calculation-spec-draft.md) — underlying billing specification and Koku metric alignment.
+- [API Reference](api-reference.md) — HTTP API endpoints including rates, quotas, reports, and UI tools.
+- [Data Model](data-model.md) — full PostgreSQL schemas for `rates`, `pricing_rules`, `metering_entries`, and `cost_entries`.
+- [GoRules Decision Logic & Diagrams](research/gorules-rule-diagrams.md) — decision graph node layouts and truth tables.
+- [GoRules Integration Assessment](research/gorules-integration-assessment.md) — technical evaluation of the Rust/Zen decision engine.
+- [GoRules Demo Walkthrough](demos/gorules-demo.md) — step-by-step interactive demo running against OSAC.
+- [Bruno Collection](../bruno-collection/) — clickable API request collection including the `Rates/` folder.
 
-## OSAC Pricing Model: Instance Type
+---
 
-OSAC is moving toward a model where `ComputeInstance` events carry an
-`instance_type` field but **not** CPU/memory specs. The cost of a VM
-is determined by its instance type — not by decomposing into
-core-hours and GiB-hours. This is analogous to how AWS EC2 pricing
-works: an `m5.xlarge` costs $X/hr regardless of how you look at its
-4 cores and 16 GiB.
+## 1. Rating Architecture Overview
 
-**Recommended setup:** configure one rate per instance type on the
-`vm_uptime_seconds` meter (Option 1 below). Set CPU/memory meter
-rates to $0 so they produce zero-cost entries (useful for capacity
-reporting but not billing). This way the catalog fallback for
-cores/memory never affects cost — even if OSAC stops sending specs
-and the instance type isn't in the local catalog.
+The rating engine in `inventory-watcher/internal/rating/rating.go` converts unrated `metering_entries` into billable `cost_entries`. It operates as a **two-tier architecture**:
 
-The rate engine supports per-SKU pricing via the `instance_type`
-dimension on the `rates` table. This enables three distinct pricing
-models that can be mixed per resource type.
-
-## Rate Matching Logic
-
-When the rating sweep prices a metering entry, it looks up a rate
-using a 4-way fallback:
-
-1. **Tenant + instance_type** — e.g. a negotiated rate for tenant-acme on m5.xlarge
-2. **Instance_type only** — e.g. a global SKU price for m5.xlarge
-3. **Tenant only** — e.g. a tenant-wide override for all VM sizes
-4. **Global default** — e.g. a baseline rate for all VMs
-
-The first match wins. An empty `instance_type` on a rate means "applies
-to all instance types" (same as an empty `tenant_id` means "applies to
-all tenants").
-
-## Pricing Models
-
-### Option 1: Flat rate per instance type (recommended)
-
-Price each VM size by its instance type. Cost comes from the
-`vm_uptime_seconds` meter matched to an instance-type-specific rate.
-**No dependency on CPU/memory fields from OSAC or the catalog.**
-
-This is the recommended model because:
-- OSAC is removing `cores`/`memory_gib` from `ComputeInstance` events
-- The instance type fully determines the price (like cloud provider pricing)
-- No catalog lookup needed — the `instance_type` string on the event
-  is sufficient for rate matching
-
-```sql
--- Per-instance-type pricing: each SKU has its own hourly rate
-INSERT INTO rates (resource_type, instance_type, meter_name, cost_type, price_per_unit, currency)
-VALUES
-  ('compute_instance', 'm5.xlarge',  'vm_uptime_seconds', 'Infrastructure', 0.50 / 3600, 'USD'),
-  ('compute_instance', 'm5.4xlarge', 'vm_uptime_seconds', 'Infrastructure', 2.00 / 3600, 'USD'),
-  ('compute_instance', 'c5.2xlarge', 'vm_uptime_seconds', 'Infrastructure', 1.20 / 3600, 'USD');
-
--- Zero out CPU/memory rates — these meters still emit for capacity
--- reporting but produce $0 cost entries
-INSERT INTO rates (resource_type, instance_type, meter_name, cost_type, price_per_unit, currency)
-VALUES
-  ('compute_instance', '', 'vm_cpu_core_seconds',    'Supplementary', 0, 'USD'),
-  ('compute_instance', '', 'vm_memory_gib_seconds',  'Supplementary', 0, 'USD');
+```
+                         Unrated Metering Entry
+                                  │
+                                  ▼
+               ┌──────────────────────────────────────┐
+               │ Tier 1: Programmable Decision Engine │
+               │   (GoRules / Zen JSON Decision Graph)│
+               └──────────────────┬───────────────────┘
+                                  │
+                       Matched? ──┴── No / Error / Unconfigured
+                          │                       │
+                         Yes                      ▼
+                          │         ┌───────────────────────────┐
+                          │         │ Tier 2: Static Rate Cards │
+                          │         │     (PostgreSQL rates)    │
+                          │         └─────────────┬─────────────┘
+                          │                       │
+                          │            4-way Fallback Match
+                          │            (Tenant + SKU > SKU > ...)
+                          │                       │
+                          ▼                       ▼
+                    Calculate Cost          Calculate Cost
+                  (Rules Expression)     (Flat / Tier Waterfall)
+                          │                       │
+                          └───────────┬───────────┘
+                                      │
+                                      ▼
+                            Insert Cost Entry
+                            (PostgreSQL cost_entries)
 ```
 
-**Result:** A tenant running one m5.xlarge for 1 hour pays $0.50.
-CPU/memory meters still exist (for capacity tracking / reporting) but
-produce $0 cost entries. The catalog fallback for cores/memory is
-irrelevant — cost is determined entirely by instance type × uptime.
+1. **Tier 1 (Programmable Decision Engine):** Evaluated first via `r.tryRuleEngine()`. If a matching rule exists (e.g. `compute-pricing.json`), GoRules evaluates multi-dimensional policies (e.g. instance type combined with tenant tier discounts or committed-use utilization brackets).
+2. **Tier 2 (Static Rate Cards):** If no programmable rule matches or GoRules is disabled, the rating sweep falls back to `matchRate()` on the `rates` table using a 4-way fallback hierarchy. Cost is computed using either flat multiplication or graduated tier waterfalls.
 
-**How to add a new instance type:** insert one row into `rates` with
-the instance type name and per-second price. No catalog sync needed.
-If no rate exists for an instance type, the fallback chain tries
-tenant-only → global default (see Rate Matching Logic above).
+---
 
-### Option 2: CPU/memory rates (pre-OSAC / traditional model)
+## 2. Rate Forms & Capabilities Comparison
 
-Price based on provisioned resources. Works when OSAC sends
-`cores`/`memory_gib` on the instance, or when the `InstanceType`
-catalog is populated (catalog fallback resolves specs automatically).
+The PoC supports four distinct rate forms across its two rating tiers:
 
-```sql
--- Global resource-based rates (no instance_type dimension)
-INSERT INTO rates (resource_type, meter_name, cost_type, price_per_unit, currency)
-VALUES
-  ('compute_instance', 'vm_uptime_seconds',       'Infrastructure',  0.01  / 3600, 'USD'),
-  ('compute_instance', 'vm_cpu_core_seconds',     'Supplementary',   0.005 / 3600, 'USD'),
-  ('compute_instance', 'vm_memory_gib_seconds',   'Supplementary',   0.002 / 3600, 'USD');
+| Rate Form | Engine Layer | Stored In | Best Used For | Example |
+| :--- | :--- | :--- | :--- | :--- |
+| **Flat Rate** | Static (`rates`) | `rates.price_per_unit` | Direct linear pricing per SKU or meter unit | `$0.20 / VM-hour`, `$1.50 / M tokens` |
+| **Per-Tenant Rate** | Static (`rates`) | `rates.tenant_id` | Negotiated contracts and tenant-specific discounts | Tenant `tenant-acme` pays `$0.15/hr` instead of `$0.20/hr` |
+| **Tiered (`per_event`)** | Static (`rates`) | `rates.tiers` (JSONB) | Independent graduated pricing per transaction/request | Large MaaS inference requests where tier resets each call |
+| **Tiered (`cumulative`)** | Static (`rates`) | `rates.tiers` + `rates.tier_period` | Monthly or windowed volume/capacity tiers with free allowance | First 20 GiB memory free/month, then `$0.08/GiB`, then `$0.07/GiB` |
+| **Programmable (GoRules)** | Rule Engine (Zen) | `pricing_rules` table / `rules/*.json` | Multi-factor logic, commitment agreements, and tenant tier labels | `standard-4-16` + `gold` tier label $\rightarrow$ 20% discount; CUD overage $\rightarrow$ sustained use |
+
+---
+
+## 3. Tier 1: Programmable Pricing with GoRules (Zen Engine)
+
+### Why Programmable Rules?
+
+Scalar rate tables work well for $X \times \text{rate}$ lookups. However, real enterprise cloud pricing frequently requires **multi-factor decision logic**:
+- Tenant tier discounts derived from metadata or labels (e.g. `cost-mgmt/tier=gold`).
+- Committed-Use Discounts (CUD) with sustained-use fallbacks based on monthly utilization %.
+- Business policies that change without modifying Go code or redeploying binaries.
+
+The PoC embeds **GoRules/Zen** (`github.com/gorules/zen-go`), a compiled Rust decision engine with sub-microsecond evaluation performance.
+
+### Implemented Rules
+
+The consumer includes two battle-tested JSON Decision Models (JDMs) in `inventory-watcher/rules/`:
+
+#### 1. Instance Type with Tenant Tier (`compute-pricing.json`)
+Evaluates a 2D decision table mapping `(instance_type, tenant_tier)` to base price and discount:
+
+```
+┌──────────────────┐     ┌────────────────────────────────┐     ┌────────────────┐
+│      Input       │────▶│    Instance Type Rate Matrix   │────▶│  Final Cost    │
+│  instance_type   │     │                                │     │  (Expression)  │
+│  tenant_tier     │     │ standard-4-16 + gold → 20% off │     │                │
+│  value (seconds) │     │ standard-4-16 + any  →  0% off │     │ value/3600     │
+└──────────────────┘     └────────────────────────────────┘     │   × $/hr       │
+                                                                │   × (1 - disc) │
+                                                                └────────────────┘
 ```
 
-**Result:** A 4-core, 16 GiB VM running for 1 hour costs:
-- Infrastructure: $0.01 (uptime)
-- Supplementary: $0.02 (cores) + $0.032 (memory) = $0.052
-- Total: $0.062
+* **Inputs:** `instance_type`, `tenant_tier` (from tenant OSAC labels), `value` (uptime seconds).
+* **Outputs:** `cost_amount`, `effective_rate`, `currency`, `description`.
+* **Example:** `standard-4-16` has a base rate of $0.20/hr. If the tenant has `tier=gold`, it is billed at $0.16/hr.
 
-### Option 3: Per-tenant pricing overrides
+#### 2. Committed-Use & Sustained-Use Disounts (`committed-use-pricing.json`)
+A multi-node decision graph chaining three evaluation stages:
+1. **CUD Agreement Lookup:** Looks up committed VM quota and discount for the tenant (e.g. Acme committed 5 VMs at 40% discount).
+2. **Sustained-Use Tiering:** If running VMs exceed commitment, evaluates monthly utilization % ($\ge 75\%$ gets 20% discount, $\ge 50\%$ gets 10%, etc.).
+3. **Calculation Expression Node:** Selects CUD rate if within commitment, sustained-use rate if over commitment, or on-demand rate if uncommitted.
 
-Give specific tenants negotiated rates while others get the global
-default.
+See [GoRules Decision Logic & Diagrams](research/gorules-rule-diagrams.md) for full flowcharts and truth tables.
+
+### Storage & Hot-Reloading
+
+GoRules rules can be supplied in two ways:
+1. **File-based:** Point `RULES_DIR=rules` to a directory of `.json` JDM files.
+2. **Database-backed (`pricing_rules` table):**
+   ```sql
+   CREATE TABLE pricing_rules (
+       id         BIGSERIAL PRIMARY KEY,
+       name       TEXT NOT NULL UNIQUE,
+       rule_json  JSONB NOT NULL,
+       version    INTEGER NOT NULL DEFAULT 1,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   );
+   ```
+   * On every rating sweep, `ReloadIfChanged(ctx)` queries `SELECT COALESCE(SUM(version), 0) FROM pricing_rules`.
+   * When updated, the in-memory Zen engine cache reloads immediately **with zero downtime and without service restarts**.
+
+---
+
+## 4. Tier 2: Static Rate Cards (`rates` table)
+
+### OSAC Pricing Model: Catalog Item and Machine Type
+
+OSAC `ComputeInstance` events carry two independent pricing dimensions: `catalog_item_id` identifies the catalog offering/SKU, while `billing_dimensions.instance_type` identifies the underlying machine shape (for example, `standard-4-16` or `m5.xlarge`). The receiver preserves both dimensions; catalog-specific pricing must not overwrite the machine type.
+
+**Recommended setup:**
+1. Configure one rate per catalog item on the `vm_uptime_seconds` meter when offerings have distinct prices.
+2. Use `instance_type` when the machine shape itself determines the price, independent of catalog offering.
+3. Set CPU/memory meter rates to $0 so they emit zero-cost entries (useful for capacity reporting without affecting customer invoices).
 
 ```sql
--- Global default
-INSERT INTO rates (resource_type, instance_type, meter_name, cost_type, price_per_unit, currency)
-VALUES ('compute_instance', 'm5.xlarge', 'vm_uptime_seconds', 'Infrastructure', 0.50 / 3600, 'USD');
+-- Per-instance-type pricing: each SKU has its own hourly rate ($/3600 per second)
+INSERT INTO rates (resource_type, instance_type, meter_name, cost_type, price_per_unit, currency, description)
+VALUES
+  ('compute_instance', 'standard-2-8',  'vm_uptime_seconds', 'Infrastructure', 0.10 / 3600, 'USD', '2 vCPU, 8 GiB ($0.10/hr)'),
+  ('compute_instance', 'standard-4-16', 'vm_uptime_seconds', 'Infrastructure', 0.20 / 3600, 'USD', '4 vCPU, 16 GiB ($0.20/hr)'),
+  ('compute_instance', 'standard-8-32', 'vm_uptime_seconds', 'Infrastructure', 0.40 / 3600, 'USD', '8 vCPU, 32 GiB ($0.40/hr)');
 
--- VIP tenant gets a discount
+-- Zero-rate CPU/memory meters for capacity tracking only
+INSERT INTO rates (resource_type, instance_type, meter_name, cost_type, price_per_unit, currency)
+VALUES
+  ('compute_instance', '', 'vm_cpu_core_seconds',   'Supplementary', 0, 'USD'),
+  ('compute_instance', '', 'vm_memory_gib_seconds', 'Supplementary', 0, 'USD');
+```
+
+### Rate Matching Logic
+
+When matching an unrated metering entry against the static `rates` table, the engine prefers catalog-specific rates, then machine-type rates, then tenant and global defaults. Existing rates that stored a catalog SKU in `instance_type` remain supported as a compatibility fallback.
+
+```mermaid
+flowchart TD
+    M[Metering Entry] --> C{Catalog Item Rate?}
+    C -- Match --> R1[Apply Catalog Rate]
+    C -- No --> I{Machine Type Rate?}
+    I -- Match --> R2[Apply Machine Type Rate]
+    I -- No --> T{Tenant Default?}
+    T -- Match --> R3[Apply Tenant Default]
+    T -- No --> G{Global Default?}
+    G -- Match --> R4[Apply Global Default]
+    G -- No --> R5[No Rate Found: Skip & Log Warning]
+```
+
+1. **Tenant + Catalog Item:** e.g. a negotiated contract for `tenant-acme` on `vm-standard`.
+2. **Catalog Item:** e.g. a global rate for `vm-standard` across all tenants.
+3. **Tenant + Machine Type / Machine Type:** shape-specific pricing such as `standard-8-32`.
+4. **Tenant-only / Global default:** fallback rates where both dimensions are empty.
+
+### Per-Tenant Pricing Overrides
+
+To give a VIP tenant a negotiated discount on a SKU:
+
+```sql
+-- Global baseline: $0.50/hr
+INSERT INTO rates (resource_type, instance_type, meter_name, cost_type, price_per_unit, currency)
+VALUES ('compute_instance', 'standard-4-16', 'vm_uptime_seconds', 'Infrastructure', 0.50 / 3600, 'USD');
+
+-- Negotiated override for tenant-acme: $0.30/hr
 INSERT INTO rates (tenant_id, resource_type, instance_type, meter_name, cost_type, price_per_unit, currency)
-VALUES ('tenant-vip', 'compute_instance', 'm5.xlarge', 'vm_uptime_seconds', 'Infrastructure', 0.30 / 3600, 'USD');
+VALUES ('tenant-acme', 'compute_instance', 'standard-4-16', 'vm_uptime_seconds', 'Infrastructure', 0.30 / 3600, 'USD');
 ```
 
-**Result:** tenant-vip pays $0.30/hr for m5.xlarge; everyone else
-pays $0.50/hr.
+### Model-as-a-Service (MaaS) Rates
 
-## MaaS Rates
-
-MaaS (token metering) rates don't use `instance_type` — they key on
-`meter_name` only. Three meters are billed:
+MaaS meters charge per unit of token inference consumed rather than provisioned uptime:
 
 ```sql
 INSERT INTO rates (resource_type, meter_name, cost_type, price_per_unit, currency, description)
 VALUES
-  ('model', 'maas_tokens_in',  'Supplementary', 0.50 / 1000000, 'USD', 'Prompt/input tokens (includes cached)'),
-  ('model', 'maas_tokens_out', 'Supplementary', 1.50 / 1000000, 'USD', 'Completion/output tokens (includes reasoning)'),
-  ('model', 'maas_requests',   'Supplementary', 5.00 / 1000000, 'USD', 'API requests');
+  ('model', 'maas_tokens_in',  'Supplementary', 0.50 / 1000000, 'USD', 'Prompt tokens (includes cached)'),
+  ('model', 'maas_tokens_out', 'Supplementary', 1.50 / 1000000, 'USD', 'Completion tokens (includes reasoning)'),
+  ('model', 'maas_requests',   'Supplementary', 5.00 / 1000000, 'USD', 'API request calls');
 ```
 
-**Why only three meters:** `cached_input_tokens` and `reasoning_tokens`
-from the OpenAI-compatible API are *subsets* of `prompt_tokens` and
-`completion_tokens` respectively — not additive. Metering them
-separately would double-count. We parse them from CloudEvents for
-observability but don't create separate cost entries.
+---
 
-## Catalog Fallback (legacy / capacity reporting)
+## 5. Tiered Pricing (Graduated & Cumulative)
 
-When OSAC removes `cores`/`memory_gib` from `ComputeInstance` (or
-sends them as 0), the metering sweep can resolve hardware specs from
-the `InstanceType` catalog (`inventory_instance_type` table, synced
-via the reconciler). This is a **secondary** mechanism for capacity
-reporting — **not required for billing** when using the recommended
-per-instance-type pricing model (Option 1).
-
-The fallback works like this:
-
-- If `cores == 0` and `instance_type` is set on the event, look up
-  `inventory_instance_type` by the instance type ID
-- If found: use catalog's `cores` and `memory_gib` for the
-  `vm_cpu_core_seconds` and `vm_memory_gib_seconds` meters
-- If not found: those meters produce 0
-
-**With Option 1 (per-instance-type pricing):** the catalog fallback
-is irrelevant to billing. Cost comes from `vm_uptime_seconds` ×
-instance-type-specific rate. CPU/memory meters exist for capacity
-dashboards (e.g. "how many total core-hours across the fleet") but
-their rates are set to $0.
-
-**With Option 2 (CPU/memory pricing):** the catalog fallback is
-essential — it provides the specs needed to compute non-zero
-CPU/memory meters. This model requires either OSAC to send specs
-or the catalog to be populated.
-
-## Tiered Pricing
-
-### Per-event tiers (MaaS)
-
-Per-event tiers price each metering entry independently through the
-tier ladder. Useful for MaaS where a single API call can be large
-enough to cross tier boundaries.
-
-```sql
-INSERT INTO rates (resource_type, meter_name, cost_type, price_per_unit, currency, tiers)
-VALUES (
-  'model', 'maas_tokens_in', 'Supplementary', 0, 'USD',
-  '[{"up_to": 1000000, "price_per_unit": 0},
-    {"up_to": 10000000, "price_per_unit": 0.0000005},
-    {"up_to": null, "price_per_unit": 0.0000003}]'
-);
+Tiers are stored as a JSONB array on the `rates` table:
+```json
+[
+  {"up_to": 20, "price_per_unit": 0},
+  {"up_to": 120, "price_per_unit": 0.08},
+  {"up_to": null, "price_per_unit": 0.07}
+]
 ```
 
-**Result:** Each request: first 1M tokens free, next 9M at $0.50/M,
-above 10M at $0.30/M. Each request starts fresh at tier 1.
+### Mode 1: Per-Event Tiers (`tier_mode = 'per_event'`)
+Each single metering entry is evaluated through the tier ladder independently. Useful for large single batch inference jobs where each request has its own tier structure.
 
-### Cumulative tiers (capacity and volume discounts)
+### Mode 2: Cumulative Tiers (`tier_mode = 'cumulative'`)
+Usage accumulates over a specified billing window (`tier_period`, e.g. `'monthly'`, `'5h'`, `'7d'`). The rating engine calculates marginal cost based on prior cumulative consumption:
 
-Cumulative tiers accumulate usage over a billing period. The tier
-position depends on how much the tenant has already consumed — not
-just the current entry.
+$$\text{Cost} = \text{applyTieredRate}(\text{prior\_usage} + \text{current\_value}) - \text{applyTieredRate}(\text{prior\_usage})$$
 
 ```sql
+-- Monthly memory tiers: First 20 GiB free, then graduated pricing
 INSERT INTO rates (resource_type, meter_name, cost_type, price_per_unit, currency,
-                   tier_mode, tier_period, tiers)
+                   tier_mode, tier_period, tiers, description)
 VALUES (
   'compute_instance', 'vm_memory_gib_seconds', 'Supplementary', 0, 'USD',
   'cumulative', 'monthly',
   '[{"up_to": 20, "price_per_unit": 0},
     {"up_to": 120, "price_per_unit": 0.08},
-    {"up_to": null, "price_per_unit": 0.07}]'
+    {"up_to": null, "price_per_unit": 0.07}]',
+  'First 20 GiB free/month, then graduated'
 );
 ```
 
-**Result:** Per month: first 20 GiB free, 20–120 GiB at $0.08,
-above 120 GiB at $0.07. A tenant using 200 GiB/month pays $13.60.
+### Supported Billing Periods (`tier_period`)
 
-**Key fields:**
-- `tier_mode` = `"cumulative"` — accumulate over the period (default
-  `"per_event"` for backwards compatibility)
-- `tier_period` — the accumulation window (default `""` = monthly)
+| Value | Window Duration | Window Alignment |
+| :--- | :--- | :--- |
+| `"monthly"` (default) | Calendar month | 1st of month at 00:00 UTC |
+| `"weekly"` | ISO week | Monday at 00:00 UTC |
+| `"daily"` | Calendar day | Midnight 00:00 UTC |
+| `"Nh"` (e.g. `"5h"`, `"8h"`) | N-hour slots | Anchored to midnight UTC |
+| `"Nd"` (e.g. `"7d"`, `"10d"`) | N-day slots | Anchored to 1st of month |
 
-### Windowed MaaS tiers
+---
 
-Use `tier_mode="cumulative"` with a short `tier_period` for
-time-windowed free-then-paid bands:
+## 6. Monetary Budgets & Spend Caps
 
-```sql
-INSERT INTO rates (resource_type, meter_name, cost_type, price_per_unit, currency,
-                   tier_mode, tier_period, tiers)
-VALUES (
-  'model', 'maas_tokens_in', 'Supplementary', 0, 'USD',
-  'cumulative', '5h',
-  '[{"up_to": 1000000, "price_per_unit": 0},
-    {"up_to": null, "price_per_unit": 0.00001}]'
-);
-```
-
-**Result:** Every 5 hours: first 1M tokens free, then $10/M. The
-window resets at the next 5h boundary (anchored to midnight UTC).
-
-## Billing Periods
-
-The `tier_period` field on rates and the `period` field on quotas
-accept these values:
-
-| Value | Window | Anchored to |
-|-------|--------|-------------|
-| `"monthly"` (default) | Calendar month | 1st of month 00:00 UTC |
-| `"weekly"` | ISO week | Monday 00:00 UTC |
-| `"daily"` | Calendar day | 00:00 UTC |
-| `"Nh"` (e.g. `"5h"`, `"8h"`) | N-hour slots | Midnight UTC; last slot truncated if N doesn't divide 24 |
-| `"Nd"` (e.g. `"7d"`, `"10d"`) | N-day slots | 1st of month; last slot truncated if N doesn't divide the month |
-
-## Monetary Budgets
-
-A budget is a quota with `unit` set to a currency code (`USD`, `EUR`,
-etc.). Instead of tracking metered usage from `metering_entries`, the
-quota status API reports consumed cost from `cost_entries` for that
-tenant and period.
-
-Setting `meter_name="*"` creates a tenant-wide spend budget that
-covers all meters. This lets you set a single monthly (or any period)
-spending cap regardless of which resources drive the cost.
+A spend budget is defined as a quota where `unit` is set to a currency code (`USD`, `EUR`) and `meter_name = '*'`:
 
 ```sql
--- Monthly $5,000 spend cap for tenant-acme across all meters
+-- Monthly $5,000 spend cap across all meters for tenant-acme
 INSERT INTO quotas (name, tenant_id, meter_name, limit_value, unit, period)
 VALUES ('Monthly spend cap', 'tenant-acme', '*', 5000, 'USD', 'monthly');
 ```
 
-When the quota status API evaluates a budget quota:
-- It queries `CostSum` / `TenantCostSum` (summing `cost_entries`) instead
-  of `MeteringSum`
-- Threshold checks and alerts work identically to usage quotas
-- The `consumed` field in the response is the total cost in the quota's
-  currency for the current period
+When evaluated, the quota status queries total accumulated dollars from `cost_entries` instead of raw usage units, firing alerts at configured thresholds (e.g. 50%, 70%, 90%, 100%).
 
-## Rate Table Schema
+---
+
+## 7. How to Assign & Manage Rates
+
+Rates can be managed using three interfaces depending on the workflow:
+
+### 1. Interactive Web UI (`/ui/rates`)
+
+The embedded Catalog & Rates tool at `http://localhost:8020/ui/rates` provides a browser-based management interface:
+- **Synchronized Catalog View:** Lists machine instance types (vCPU, memory GiB) and OSAC catalog offerings.
+- **Assigned Rate Status:** Shows the effective rate card assigned to each sizing spec.
+- **Inline Rate Assignment Modal:** Allows selecting a catalog SKU, specifying an hourly rate ($/hr) or direct unit rate, adding descriptions, and configuring cost types.
+- **Active Rate Cards Table:** Displays all active rates, their fallback precedence, and provides single-click **Delete** buttons.
+- **CSV Export:** One-click download of the complete active rate card table.
+
+### 2. REST API (`/api/v1/rates`)
+
+The REST API enables programmatic rate card management (defined in `docs/openapi.yaml`):
+
+#### List Rates
+```http
+GET /api/v1/rates HTTP/1.1
+Host: localhost:8020
+```
+* **Filter by tenant:** `GET /api/v1/rates?tenant_id=tenant-acme` returns tenant-specific overrides plus global defaults.
+* **CSV export:** `GET /api/v1/rates?format=csv` downloads rate cards as a CSV file.
+
+#### Create or Update Rate
+```http
+POST /api/v1/rates HTTP/1.1
+Host: localhost:8020
+Content-Type: application/json
+
+{
+  "resource_type": "compute_instance",
+  "catalog_item": "vm-standard",
+  "instance_type": "standard-4-16",
+  "meter_name": "vm_uptime_seconds",
+  "cost_type": "Infrastructure",
+  "price_per_unit": 0.00005555555555555556,
+  "currency": "USD",
+  "description": "Standard 4-core 16GB VM ($0.20/hour)"
+}
+```
+
+#### Delete Rate
+```http
+DELETE /api/v1/rates/12 HTTP/1.1
+Host: localhost:8020
+```
+
+### 3. Bruno API Collection
+
+Ready-to-run requests are checked into the repository under [`bruno-collection/Rates/`](../bruno-collection/):
+- **`List Rates (JSON)`**: Fetches all rates with optional tenant filtering.
+- **`List Rates (CSV)`**: Downloads the active rate table as CSV.
+- **`Create Rate`**: Post a new rate definition with pre-calculated unit prices.
+- **`Delete Rate`**: Delete a rate card by ID.
+
+---
+
+## 8. Database Schema Reference
 
 ```
 rates
 ├── id              BIGSERIAL PRIMARY KEY
-├── tenant_id       TEXT          -- empty/NULL = global
-├── resource_type   TEXT NOT NULL -- compute_instance, cluster, model, bare_metal
-├── instance_type   TEXT          -- empty = all instance types
-├── meter_name      TEXT NOT NULL -- vm_uptime_seconds, maas_tokens_in, etc.
-├── koku_metric     TEXT          -- Koku mapping (optional)
-├── cost_type       TEXT          -- Infrastructure or Supplementary
-├── price_per_unit  NUMERIC       -- per unit (seconds, tokens, etc.)
-├── currency        TEXT          -- USD
-├── tiers           JSONB         -- tiered pricing bands (optional)
-├── tier_mode       TEXT          -- "per_event" (default) or "cumulative"
-├── tier_period     TEXT          -- accumulation window: "", "monthly", "5h", "7d", etc.
-├── description     TEXT
-├── effective_from  TIMESTAMPTZ
-└── effective_to    TIMESTAMPTZ   -- NULL = no expiry
+├── tenant_id       TEXT          -- NULL / empty = applies to all tenants
+├── resource_type   TEXT NOT NULL -- 'compute_instance', 'cluster', 'model', 'bare_metal'
+├── catalog_item    TEXT NOT NULL -- Catalog offering name (e.g. 'vm-standard'); empty = all
+├── instance_type   TEXT NOT NULL -- SKU / sizing spec name (e.g. 'standard-4-16'); empty = all
+├── meter_name      TEXT NOT NULL -- 'vm_uptime_seconds', 'maas_tokens_in', etc.
+├── koku_metric     TEXT NOT NULL -- Optional Koku metric mapping
+├── cost_type       TEXT NOT NULL -- 'Infrastructure' or 'Supplementary'
+├── price_per_unit  NUMERIC(18,10)-- Stored pre-converted to meter SI unit
+├── currency        TEXT NOT NULL -- 'USD'
+├── tiers           JSONB         -- Optional array of graduated price bands
+├── tier_mode       TEXT NOT NULL -- 'per_event' or 'cumulative'
+├── tier_period     TEXT NOT NULL -- Window for cumulative tiers: 'monthly', '5h', etc.
+├── description     TEXT NOT NULL
+├── effective_from  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+└── effective_to    TIMESTAMPTZ   -- NULL = indefinitely active
+
+pricing_rules
+├── id              BIGSERIAL PRIMARY KEY
+├── name            TEXT NOT NULL UNIQUE -- Rule file name (e.g. 'compute-pricing.json')
+├── rule_json       JSONB NOT NULL       -- JDM decision graph definition
+├── version         INTEGER NOT NULL     -- Incremented on edit for zero-downtime hot-reload
+├── created_at      TIMESTAMPTZ NOT NULL
+└── updated_at      TIMESTAMPTZ NOT NULL
 ```

@@ -1,0 +1,24 @@
+meta {
+  name: List Rates (JSON)
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/v1/rates
+  body: none
+  auth: none
+}
+
+params:query {
+  ~tenant_id: tenant-acme
+}
+
+docs {
+  ## List Rates (JSON)
+
+  Returns active and historic rate cards configured in the system.
+
+  ### Query Parameters
+  - `tenant_id` (optional): Filter rates applicable to this tenant (returns tenant-specific rates plus global defaults where `tenant_id` is null).
+}

@@ -1,0 +1,39 @@
+meta {
+  name: Create Rate
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/api/v1/rates
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "resource_type": "compute_instance",
+    "instance_type": "standard-4-16",
+    "catalog_item": "",
+    "meter_name": "vm_uptime_seconds",
+    "cost_type": "Infrastructure",
+    "price_per_unit": 0.00005555555555555556,
+    "currency": "USD",
+    "description": "Standard 4-core 16GB VM ($0.20/hour)"
+  }
+}
+
+docs {
+  ## Create Rate
+
+  Assigns or updates a rate card in the rating engine.
+
+  ### Fields
+  - `resource_type` (required): Resource type (e.g. `compute_instance`, `cluster`, `model`, `bare_metal`).
+  - `instance_type` (optional): Machine instance type (e.g. `standard-4-16` or empty for any).
+  - `catalog_item` (optional): OSAC catalog item name/SKU (e.g. `sim-catalog-standard` or empty for any).
+  - `meter_name` (required): Meter name (e.g. `vm_uptime_seconds`, `maas_tokens_in`).
+  - `cost_type`: `Infrastructure` or `Supplementary`.
+  - `price_per_unit`: Rate per SI unit ($/3600 for seconds, $/1M for tokens).
+  - `tiers`: Optional array of graduated price bands.
+}
