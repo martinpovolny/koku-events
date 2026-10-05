@@ -244,7 +244,8 @@ const ratesHTML = `<!DOCTYPE html>
             <th>ID</th>
             <th>Scope / Tenant</th>
             <th>Resource Type</th>
-            <th>SKU / Instance Type</th>
+            <th>Catalog Item</th>
+            <th>Machine Type</th>
             <th>Meter Name</th>
             <th>Cost Type</th>
             <th class="num">Price / Unit</th>
@@ -254,7 +255,7 @@ const ratesHTML = `<!DOCTYPE html>
           </tr>
         </thead>
         <tbody id="ratesBody">
-          <tr><td colspan="10" class="empty">Loading rates…</td></tr>
+          <tr><td colspan="11" class="empty">Loading rates…</td></tr>
         </tbody>
       </table>
     </div>
@@ -278,9 +279,14 @@ const ratesHTML = `<!DOCTYPE html>
         </select>
       </div>
       <div class="form-group">
-        <label>Instance Type / SKU</label>
+        <label>Machine Instance Type</label>
         <input type="text" id="rateInstanceType" placeholder="e.g. standard-4-16 (or blank for all)">
-        <div class="hint">Matches machine type or catalog template name.</div>
+        <div class="hint">OSAC hardware shape, from billing_dimensions.instance_type.</div>
+      </div>
+      <div class="form-group">
+        <label>Catalog Item</label>
+        <input type="text" id="rateCatalogItem" placeholder="e.g. sim-catalog-standard (or blank for all)">
+        <div class="hint">OSAC catalog item name/SKU, from catalog_item_id.</div>
       </div>
     </div>
 
@@ -441,15 +447,28 @@ async function loadAll() {
 }
 
 function findMatchingRate(resourceType, instanceType) {
-  // Check exact instance_type + resource_type match first (global or any tenant)
+  // Machine-type rates do not match catalog-specific rates.
   const exact = state.rates.find(r => (!r.effective_to || new Date(r.effective_to) > new Date()) &&
     r.resource_type.toLowerCase() === resourceType.toLowerCase() &&
+    (!r.catalog_item || r.catalog_item === '') &&
     r.instance_type === instanceType);
   if (exact) return exact;
 
   // Fallback to resource_type default
   return state.rates.find(r => (!r.effective_to || new Date(r.effective_to) > new Date()) &&
     r.resource_type.toLowerCase() === resourceType.toLowerCase() &&
+    (!r.catalog_item || r.catalog_item === '') &&
+    (!r.instance_type || r.instance_type === ''));
+}
+
+function findMatchingCatalogRate(resourceType, catalogItem) {
+  const exact = state.rates.find(r => (!r.effective_to || new Date(r.effective_to) > new Date()) &&
+    r.resource_type.toLowerCase() === resourceType.toLowerCase() &&
+    r.catalog_item === catalogItem);
+  if (exact) return exact;
+  return state.rates.find(r => (!r.effective_to || new Date(r.effective_to) > new Date()) &&
+    r.resource_type.toLowerCase() === resourceType.toLowerCase() &&
+    (!r.catalog_item || r.catalog_item === '') &&
     (!r.instance_type || r.instance_type === ''));
 }
 
@@ -513,7 +532,7 @@ function renderAll() {
     else if (ci.item_type && ci.item_type.includes('bare_metal')) { resType = 'bare_metal'; catLabel = 'Bare Metal Offering'; }
     else if (ci.item_type && ci.item_type.includes('model')) { resType = 'model'; catLabel = 'Model Offering'; }
 
-    const rate = findMatchingRate(resType, ci.name) || findMatchingRate(resType, ci.catalog_item_id);
+    const rate = findMatchingCatalogRate(resType, ci.name) || findMatchingCatalogRate(resType, ci.catalog_item_id);
     unified.push({
       category: resType,
       categoryLabel: catLabel,
@@ -564,7 +583,7 @@ function renderAll() {
         '<td><span style="font-size:0.8rem;text-transform:capitalize">' + escapeHTML(item.status) + '</span></td>' +
         '<td>' + formatPriceDisplay(item.rate) + '</td>' +
         '<td>' + meterText + '</td>' +
-        '<td class="num"><button class="btn-sm primary btn-assign" data-resource-type="' + escapeHTML(item.resourceType) + '" data-sku="' + escapeHTML(item.sku) + '">' + escapeHTML(actionText) + '</button></td>' +
+        '<td class="num"><button class="btn-sm primary btn-assign" data-resource-type="' + escapeHTML(item.resourceType) + '" data-category="' + escapeHTML(item.category) + '" data-sku="' + escapeHTML(item.sku) + '">' + escapeHTML(actionText) + '</button></td>' +
       '</tr>';
     }).join('');
   }
@@ -572,7 +591,7 @@ function renderAll() {
   // Render Rates Table
   const ratesBody = $('ratesBody');
   if (activeRates.length === 0) {
-    ratesBody.innerHTML = '<tr><td colspan="10" class="empty">No active rates configured.</td></tr>';
+    ratesBody.innerHTML = '<tr><td colspan="11" class="empty">No active rates configured.</td></tr>';
   } else {
     ratesBody.innerHTML = activeRates.map(r => {
       const price = parseFloat(r.price_per_unit) || 0;
@@ -586,6 +605,7 @@ function renderAll() {
         '<td>' + escapeHTML(r.id) + '</td>' +
         '<td>' + tenant + '</td>' +
         '<td><span class="code-text">' + escapeHTML(r.resource_type) + '</span></td>' +
+        '<td><span class="code-text">' + escapeHTML(r.catalog_item || '*(any)*') + '</span></td>' +
         '<td><span class="code-text">' + escapeHTML(r.instance_type || '*(any)*') + '</span></td>' +
         '<td><span class="code-text">' + escapeHTML(r.meter_name) + '</span></td>' +
         '<td><span class="badge ' + costBadge + '">' + escapeHTML(r.cost_type) + '</span></td>' +
@@ -641,6 +661,7 @@ function openAssignModal() {
   $('modalTitle').textContent = 'Assign Rate Card';
   $('rateResourceType').value = 'compute_instance';
   $('rateInstanceType').value = '';
+  $('rateCatalogItem').value = '';
   $('rateMeterName').value = 'vm_uptime_seconds';
   $('rateCostType').value = 'Infrastructure';
   $('ratePriceMode').value = 'hourly';
@@ -651,11 +672,15 @@ function openAssignModal() {
   $('rateModal').style.display = 'flex';
 }
 
-function openAssignModalFor(resourceType, sku) {
+function openAssignModalFor(resourceType, sku, category) {
   openAssignModal();
   $('modalTitle').textContent = 'Assign Rate: ' + sku;
   $('rateResourceType').value = resourceType;
-  $('rateInstanceType').value = sku;
+  if (category === 'instance_type') {
+    $('rateInstanceType').value = sku;
+  } else {
+    $('rateCatalogItem').value = sku;
+  }
   onResourceTypeChange();
   $('rateDescription').value = 'Rate for ' + sku;
 }
@@ -665,6 +690,7 @@ function closeAssignModal() { $('rateModal').style.display = 'none'; }
 async function submitRateForm() {
   const resourceType = $('rateResourceType').value.trim();
   const instanceType = $('rateInstanceType').value.trim();
+  const catalogItem = $('rateCatalogItem').value.trim();
   const meterName = $('rateMeterName').value.trim();
   const costType = $('rateCostType').value;
   const currency = $('rateCurrency').value.trim() || 'USD';
@@ -684,6 +710,7 @@ async function submitRateForm() {
   const payload = {
     resource_type: resourceType,
     instance_type: instanceType,
+    catalog_item: catalogItem,
     meter_name: meterName,
     cost_type: costType,
     price_per_unit: pricePerUnit,
@@ -730,7 +757,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('catalogBody').addEventListener('click', (e) => {
     const btn = e.target.closest('.btn-assign');
     if (btn) {
-      openAssignModalFor(btn.dataset.resourceType, btn.dataset.sku);
+      openAssignModalFor(btn.dataset.resourceType, btn.dataset.sku, btn.dataset.category);
     }
   });
 

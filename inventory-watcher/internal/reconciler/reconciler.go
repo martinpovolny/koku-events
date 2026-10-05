@@ -140,6 +140,7 @@ func (r *Reconciler) reconcileComputeInstances(ctx context.Context) {
 				Name:         ci.Metadata.Name,
 				Tenant:       ci.Metadata.Tenant,
 				InstanceType: ci.Spec.InstanceType.ID,
+				CatalogItem:  ci.Spec.CatalogItem.Name,
 				Cores:        cores,
 				MemoryGiB:    memGiB,
 				State:        ci.Status.State,

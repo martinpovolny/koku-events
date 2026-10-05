@@ -2165,7 +2165,7 @@ func TestProcessKafkaEvent_OSACv1ResourceCreated(t *testing.T) {
 	}
 }
 
-func TestProcessKafkaEvent_OSACv1CatalogItemUsesCatalogSKU(t *testing.T) {
+func TestProcessKafkaEvent_OSACv1PreservesCatalogAndMachineDimensions(t *testing.T) {
 	ctx := context.Background()
 	h := api.NewAPIHandler(testStore, testMeter, nil, nil, testLogger)
 
@@ -2201,8 +2201,11 @@ func TestProcessKafkaEvent_OSACv1CatalogItemUsesCatalogSKU(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetComputeInstance failed: %v", err)
 	}
-	if ci.InstanceType != "catalog-sku-123" {
-		t.Fatalf("instance_type: got %q, want catalog-sku-123", ci.InstanceType)
+	if ci.InstanceType != "standard-4-8" {
+		t.Fatalf("instance_type: got %q, want standard-4-8", ci.InstanceType)
+	}
+	if ci.CatalogItem != "catalog-sku-123" {
+		t.Fatalf("catalog_item: got %q, want catalog-sku-123", ci.CatalogItem)
 	}
 }
 

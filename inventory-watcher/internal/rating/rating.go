@@ -107,7 +107,7 @@ func (r *Rater) sweep(ctx context.Context) {
 				continue
 			}
 
-			rate := matchRate(rateIndex, me.TenantID, me.InstanceType, me.ResourceType, me.MeterName)
+			rate := matchRate(rateIndex, me.TenantID, me.CatalogItem, me.InstanceType, me.ResourceType, me.MeterName)
 			if rate == nil {
 				totalSkipped++
 				ratedIDs = append(ratedIDs, me.ID)
@@ -299,6 +299,7 @@ func (r *Rater) DeductWallets(ctx context.Context) {
 
 type rateKey struct {
 	tenant       string
+	catalogItem  string
 	instanceType string
 	resourceType string
 	meterName    string
@@ -312,7 +313,7 @@ func buildRateIndex(rates []inventory.RateRecord) map[rateKey]*inventory.RateRec
 		if r.TenantID != nil {
 			tenant = *r.TenantID
 		}
-		key := rateKey{tenant: tenant, instanceType: r.InstanceType, resourceType: r.ResourceType, meterName: r.MeterName}
+		key := rateKey{tenant: tenant, catalogItem: r.CatalogItem, instanceType: r.InstanceType, resourceType: r.ResourceType, meterName: r.MeterName}
 		if _, exists := idx[key]; !exists {
 			idx[key] = r
 		}
@@ -320,36 +321,30 @@ func buildRateIndex(rates []inventory.RateRecord) map[rateKey]*inventory.RateRec
 	return idx
 }
 
-// matchRate looks up a rate with 4-way fallback:
-//  1. tenant + instance_type specific
-//  2. instance_type specific (any tenant)
-//  3. tenant specific (any instance_type)
-//  4. global default (any tenant, any instance_type)
-func matchRate(idx map[rateKey]*inventory.RateRecord, tenantID, instanceType, resourceType, meterName string) *inventory.RateRecord {
+// matchRate looks up a rate with catalog-specific pricing taking precedence
+// over machine-type pricing, followed by tenant and global defaults. The
+// legacy instance_type=CATALOG-SKU representation is checked after the new
+// catalog_item dimension so existing rate definitions remain usable.
+func matchRate(idx map[rateKey]*inventory.RateRecord, tenantID, catalogItem, instanceType, resourceType, meterName string) *inventory.RateRecord {
 	base := rateKey{resourceType: resourceType, meterName: meterName}
-
-	base.tenant = tenantID
-	base.instanceType = instanceType
-	if r, ok := idx[base]; ok {
-		return r
+	candidates := []rateKey{
+		{tenant: tenantID, catalogItem: catalogItem, instanceType: instanceType, resourceType: resourceType, meterName: meterName},
+		{catalogItem: catalogItem, instanceType: instanceType, resourceType: resourceType, meterName: meterName},
+		{tenant: tenantID, catalogItem: catalogItem, resourceType: resourceType, meterName: meterName},
+		{catalogItem: catalogItem, resourceType: resourceType, meterName: meterName},
+		{tenant: tenantID, instanceType: instanceType, resourceType: resourceType, meterName: meterName},
+		{instanceType: instanceType, resourceType: resourceType, meterName: meterName},
+		// Before catalog_item existed, catalog SKUs were stored in instance_type.
+		{tenant: tenantID, instanceType: catalogItem, resourceType: resourceType, meterName: meterName},
+		{instanceType: catalogItem, resourceType: resourceType, meterName: meterName},
+		{tenant: tenantID, resourceType: resourceType, meterName: meterName},
+		base,
 	}
-
-	base.tenant = ""
-	if r, ok := idx[base]; ok {
-		return r
+	for _, candidate := range candidates {
+		if r, ok := idx[candidate]; ok {
+			return r
+		}
 	}
-
-	base.tenant = tenantID
-	base.instanceType = ""
-	if r, ok := idx[base]; ok {
-		return r
-	}
-
-	base.tenant = ""
-	if r, ok := idx[base]; ok {
-		return r
-	}
-
 	return nil
 }
 
