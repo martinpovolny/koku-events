@@ -3,7 +3,11 @@
 > All CloudEvents formats consumed or produced by the cost-event-consumer.
 > Sources linked for each schema.
 
+The current OSAC-to-Cost path is the canonical OSAC metering-service v1 contract described near the end of this document. The earlier collector and simulator formats remain supported for compatibility, but they are historical and are not emitted by the OSAC Cost Management adapter.
+
 ## VMaaS — Compute Instance Lifecycle
+
+> Historical compatibility format. The current OSAC adapter sends canonical `osac.resource.*.v1` events instead; see [OSAC Metering-Service v1](#osac-metering-service-v1--canonical-cost-management-adapter-contract).
 
 **Type:** `osac.compute_instance.lifecycle`
 **Source:** OSAC metering collector ([schema](https://github.com/masayag/osac-metering-discover-poc/blob/main/collector/README.md#cloudevents-schema))
@@ -42,6 +46,8 @@
 ---
 
 ## CaaS — Cluster Lifecycle
+
+> Historical compatibility format. The current OSAC adapter sends canonical `osac.resource.*.v1` events instead; see [OSAC Metering-Service v1](#osac-metering-service-v1--canonical-cost-management-adapter-contract).
 
 **Type:** `osac.cluster.lifecycle`
 **Source:** OSAC metering collector ([schema](https://github.com/masayag/osac-metering-discover-poc/blob/main/collector/README-caas.md#cloudevents-schema))
@@ -100,6 +106,8 @@ Worker → `cluster_worker_node_seconds` (node_count × duration).
 ---
 
 ## MaaS — Inference Token Usage (IPP Plugin)
+
+> External IPP compatibility format. It is not the event shape emitted by the OSAC Cost Management adapter; the current canonical OSAC inference event is documented below.
 
 **Type:** `inference.tokens.used`
 **Source:** IPP external-metering plugin
@@ -231,6 +239,8 @@ struct tag, not `has_access` (snake_case).
 
 ## MaaS — Our Current Mock Format
 
+> Historical simulator format. Retained as a compatibility reference for older demo data.
+
 **Type:** `osac.model.lifecycle`
 **Source:** Our `maas-simulator` (`cmd/maas-simulator/main.go`)
 **Our handler:** `internal/api/handler.go` → `handleModelEvent`
@@ -272,18 +282,45 @@ meters (`maas_tokens_in`, `maas_tokens_out`, `maas_requests`).
 
 ---
 
-## OSAC Metering-Service v1 — Resource Lifecycle (OSAC-985)
+## OSAC Metering-Service v1 — Canonical Cost Management Adapter Contract
 
-**Types:**
-- `osac.resource.created.v1` — resource provisioned
-- `osac.resource.deleted.v1` — resource deleted
-- `osac.resource.started.v1` — VM started (RUNNING)
-- `osac.resource.suspended.v1` — VM stopped/paused/failed
-- `osac.resource.updated.v1` — generic update
+The OSAC Cost Management adapter validates these events, buffers them, and forwards the structured CloudEvents unchanged to `POST /api/v1/events/batch`. It does not translate them into a provider-specific payload.
 
 **Source:** [osac-metering service](https://github.com/osac-project/osac/tree/main/osac-metering/metering-service)
-**Our handler:** `internal/api/handler.go` → `processOSACResourceEvent`
-**Topic:** `osac.metering.lifecycle`
+**Adapter:** [Cost Management adapter](https://github.com/osac-project/osac/blob/main/osac-metering/adapters/cmd/cost-management-adapter/adapter.go)
+**Receiver:** `internal/api/handler.go` → `IngestEventBatch` → `processOSACResourceEvent`
+
+### Event types and Kafka topics
+
+| Event type | Kafka topic | Meaning |
+|------------|-------------|---------|
+| `osac.resource.created.v1` | `osac.metering.lifecycle` | Resource created |
+| `osac.resource.started.v1` | `osac.metering.lifecycle` | Resource became billable for the first time |
+| `osac.resource.resumed.v1` | `osac.metering.lifecycle` | Previously billable resource became billable again |
+| `osac.resource.updated.v1` | `osac.metering.lifecycle` | Resource or billing dimensions updated |
+| `osac.resource.suspended.v1` | `osac.metering.lifecycle` | Resource stopped being billable |
+| `osac.resource.deleted.v1` | `osac.metering.lifecycle` | Resource deleted |
+| `osac.resource.heartbeat.v1` | `osac.metering.heartbeat` | Periodic usage/liveness boundary |
+| `osac.resource.correction.v1` | `osac.metering.corrections` | Correction to previously emitted usage |
+| `osac.inference.usage.v1` | `osac.metering.inference` | MaaS inference usage |
+
+The adapter subscribes to all four OSAC metering topics. koku-events currently consumes lifecycle, heartbeat, and inference topics; corrections are not yet wired into its consumer or HTTP validation path.
+
+### Supported resource types
+
+The adapter allow-list is:
+
+| Resource type | Current koku-events handling |
+|---------------|------------------------------|
+| `compute_instance` | Upserts the VM inventory record; the metering sweep produces usage entries |
+| `cluster_order` | Upserts the cluster inventory record |
+| `maas_inference` | Upserts the model and produces inference usage entries |
+| `external_ip` | Accepted by the adapter and koku-events, stored as raw data, but not converted into metering entries |
+| `nat_gateway` | Accepted by the adapter and koku-events, stored as raw data, but not converted into metering entries |
+| `bare_metal_instance` | Accepted by the adapter and koku-events, stored as raw data, but not converted into metering entries |
+| `volume` | Accepted by the adapter and koku-events, stored as raw data, but not converted into metering entries |
+
+### Canonical CloudEvent envelope
 
 ```json
 {
@@ -308,6 +345,7 @@ meters (`maas_tokens_in`, `maas_tokens_out`, `maas_requests`).
     "current_state": "RUNNING",
     "transition_time": "<ISO8601-nano>",
     "duration_seconds": null,
+    "usage": null,
     "billing_dimensions": {
       "instance_type": "standard-4-8",
       "image_ref": "quay.io/fedora/fedora:latest",
@@ -329,9 +367,37 @@ meters (`maas_tokens_in`, `maas_tokens_out`, `maas_requests`).
 
 ### What we do with it
 
-For `compute_instance` resources, we upsert an `inventory_compute_instance`
-record with state and instance_type from billing_dimensions. The existing
-metering sweep then meters the resource on its normal 60s cycle.
+For `compute_instance` resources, we upsert an `inventory_compute_instance` record with state and instance_type from `billing_dimensions`. The existing metering sweep then meters the resource on its normal 60s cycle. For `cluster_order`, we upsert the cluster inventory record. For `maas_inference`, we create the model record and meter the token dimensions from `billing_dimensions`.
+
+Heartbeat events use the same identity extensions and canonical resource fields, but do not require `transition_time`; they carry periodic `duration_seconds`, `billing_dimensions`, and, for resources such as volumes, an optional cumulative `usage` object. The adapter explicitly accepts heartbeats for every supported resource type.
+
+The canonical `usage` object, when present, has this shape:
+
+```json
+{
+  "semantics": "interval",
+  "from": "<ISO8601>",
+  "to": "<ISO8601>",
+  "quantity": "123.000000",
+  "unit": "gibibyte_second",
+  "precision": "microsecond"
+}
+```
+
+### Required envelope and identity rules
+
+- CloudEvents `specversion` is `1.0`, with `id`, `type`, `source`, `time`, and `datacontenttype: application/json`.
+- The payload includes `resource_id`, `resource_type`, `tenant_id`, `schema_version: v1`, and `billing_dimensions`.
+- Lifecycle and inference events include RFC3339 `transition_time`; heartbeat events may omit it.
+- `osacresourceid`, `osacresourcetype`, and `osactenant` are required extensions and must match the corresponding payload fields.
+- `osacproject` is optional and mirrors `project_id` when available.
+- Batch delivery contains 1–100 events and is limited to 1 MiB.
+
+### Known integration gaps
+
+- `osac.resource.correction.v1` is produced on `osac.metering.corrections` and consumed by the adapter, but koku-events does not currently consume or classify it. A correction reaching `/api/v1/events/batch` is rejected by the current receiver validation.
+- The adapter accepts `external_ip`, `nat_gateway`, `bare_metal_instance`, and `volume` heartbeat/lifecycle events, but koku-events currently retains them as raw events without producing metering or cost entries.
+- The older collector sections above describe different fields such as `instance_id`, `cluster_id`, `cores`, and `worker_node_seconds`; those fields should not be added to canonical v1 events.
 
 **Authoritative source:**
 [`metering-service/internal/events/mapper.go`](https://github.com/osac-project/osac/blob/main/osac-metering/metering-service/internal/events/mapper.go) —
