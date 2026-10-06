@@ -213,6 +213,7 @@ func (r *Rater) tryRuleEngine(ctx context.Context, me inventory.MeteringEntry) (
 
 	output, err := r.rules.EvaluateRate("compute-pricing.json", ruleengine.PricingInput{
 		InstanceType: instanceType,
+		CatalogItem:  me.CatalogItem,
 		TenantTier:   tenantTier,
 		TenantID:     me.TenantID,
 		ResourceType: me.ResourceType,

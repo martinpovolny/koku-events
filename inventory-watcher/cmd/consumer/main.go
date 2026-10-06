@@ -103,7 +103,7 @@ func main() {
 				logger.Warn("failed to read rule file for seeding", "file", e.Name(), "error", err)
 				continue
 			}
-			name := strings.TrimSuffix(e.Name(), ".json")
+			name := e.Name()
 			if err := store.UpsertPricingRule(ctx, name, data); err != nil {
 				logger.Warn("failed to seed pricing rule", "name", name, "error", err)
 			} else {

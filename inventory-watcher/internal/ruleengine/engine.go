@@ -111,6 +111,7 @@ func (e *Engine) Close() {
 
 type PricingInput struct {
 	InstanceType string  `json:"instance_type"`
+	CatalogItem  string  `json:"catalog_item"`
 	TenantTier   string  `json:"tenant_tier"`
 	TenantID     string  `json:"tenant_id"`
 	ResourceType string  `json:"resource_type"`
@@ -130,6 +131,7 @@ type PricingOutput struct {
 func (e *Engine) EvaluateRate(ruleFile string, input PricingInput) (*PricingOutput, error) {
 	inputMap := map[string]any{
 		"instance_type": input.InstanceType,
+		"catalog_item":  input.CatalogItem,
 		"tenant_tier":   input.TenantTier,
 		"tenant_id":     input.TenantID,
 		"resource_type": input.ResourceType,

@@ -14,6 +14,7 @@
       "content": {
         "hitPolicy": "first",
         "inputs": [
+          {"field": "catalog_item", "id": "col-catalog", "name": "Catalog Item", "type": "expression"},
           {"field": "instance_type", "id": "col-itype", "name": "Instance Type", "type": "expression"},
           {"field": "tenant_tier", "id": "col-tier", "name": "Tenant Tier", "type": "expression"}
         ],
@@ -25,7 +26,18 @@
         ],
         "rules": [
           {
+            "_id": "catalog-live-vm-standard",
+            "col-catalog": "\"catalog-live-vm-standard\"",
+            "col-itype": "",
+            "col-tier": "",
+            "col-price": "0.30",
+            "col-discount": "0",
+            "col-desc": "'catalog-live-vm-standard via GoRule ($0.30/hr)'",
+            "col-val": "value"
+          },
+          {
             "_id": "r1",
+            "col-catalog": "",
             "col-itype": "\"standard-2-8\"",
             "col-tier": "\"gold\"",
             "col-price": "0.10",
@@ -35,6 +47,7 @@
           },
           {
             "_id": "r2",
+            "col-catalog": "",
             "col-itype": "\"standard-2-8\"",
             "col-tier": "",
             "col-price": "0.10",
@@ -44,6 +57,7 @@
           },
           {
             "_id": "r3",
+            "col-catalog": "",
             "col-itype": "\"standard-4-16\"",
             "col-tier": "\"gold\"",
             "col-price": "0.20",
@@ -53,6 +67,7 @@
           },
           {
             "_id": "r4",
+            "col-catalog": "",
             "col-itype": "\"standard-4-16\"",
             "col-tier": "",
             "col-price": "0.20",
@@ -62,6 +77,7 @@
           },
           {
             "_id": "r5",
+            "col-catalog": "",
             "col-itype": "\"standard-8-32\"",
             "col-tier": "\"gold\"",
             "col-price": "0.40",
@@ -71,6 +87,7 @@
           },
           {
             "_id": "r6",
+            "col-catalog": "",
             "col-itype": "\"standard-8-32\"",
             "col-tier": "",
             "col-price": "0.40",
@@ -80,6 +97,7 @@
           },
           {
             "_id": "r-default",
+            "col-catalog": "",
             "col-itype": "",
             "col-tier": "",
             "col-price": "0.10",
@@ -99,7 +117,10 @@
         "expressions": [
           {"id": "e1", "key": "cost_amount", "value": "(value / 3600) * price_per_hour * (1 - discount_pct / 100)"},
           {"id": "e2", "key": "effective_rate", "value": "price_per_hour * (1 - discount_pct / 100)"},
-          {"id": "e3", "key": "currency", "value": "'USD'"}
+          {"id": "e3", "key": "currency", "value": "'USD'"},
+          {"id": "e4", "key": "description", "value": "description"},
+          {"id": "e5", "key": "price_per_hour", "value": "price_per_hour"},
+          {"id": "e6", "key": "discount_pct", "value": "discount_pct"}
         ]
       }
     },

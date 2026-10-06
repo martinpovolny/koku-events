@@ -324,6 +324,39 @@ func TestNewFromStore_LoadsRules(t *testing.T) {
 	}
 }
 
+func TestEvaluateRate_CatalogItemRule(t *testing.T) {
+	ruleJSON, err := os.ReadFile(path.Join("..", "..", "rules", "compute-pricing.json"))
+	if err != nil {
+		t.Fatalf("read rule file: %v", err)
+	}
+
+	store := &mockRuleStore{
+		rules:   []inventory.PricingRule{{Name: "compute-pricing.json", RuleJSON: ruleJSON, Version: 1}},
+		version: 1,
+	}
+	engine := NewFromStore(store)
+	defer engine.Close()
+
+	if _, err := engine.ReloadIfChanged(context.Background()); err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+
+	output, err := engine.EvaluateRate("compute-pricing.json", PricingInput{
+		CatalogItem:  "catalog-live-vm-standard",
+		InstanceType: "standard-4-8",
+		Value:        3600,
+	})
+	if err != nil {
+		t.Fatalf("evaluate failed: %v", err)
+	}
+	if output.CostAmount < 0.29 || output.CostAmount > 0.31 {
+		t.Errorf("expected catalog GoRule cost ~$0.30, got $%.4f", output.CostAmount)
+	}
+	if output.Description != "catalog-live-vm-standard via GoRule ($0.30/hr)" {
+		t.Errorf("unexpected description: %q", output.Description)
+	}
+}
+
 func TestReloadIfChanged_NoReloadWhenVersionUnchanged(t *testing.T) {
 	store := &mockRuleStore{version: 5}
 	engine := NewFromStore(store)
