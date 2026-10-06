@@ -245,6 +245,8 @@ Example config for docs/demo.
 
 ## Phase 2: GoRules/Zen Integration Path
 
+> **Historical design section:** GoRules/Zen has since been integrated into the rating path. The extraction boundary described here remains valid, but the Phase 2 implementation is no longer merely planned; current storage and reload behavior are documented in [Rate Configuration Guide](../rate-configuration-guide.md).
+
 This PoC (Phase 1) deliberately keeps the two concerns separate:
 
 ```

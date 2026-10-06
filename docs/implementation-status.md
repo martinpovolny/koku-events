@@ -314,15 +314,7 @@ OSAC provides a CloudEvent spec for what they want to receive.
 **Design:** [req13-custom-metrics-design.md](research/req13-custom-metrics-design.md)
 **Related Jira:** [COST-3549](https://redhat.atlassian.net/browse/COST-3549)
 
-**Caveat:** Custom metrics today can only extract and meter raw
-CloudEvent fields — the rating is still flat (value × price_per_unit).
-For the spec's "creative math" use case (e.g. "multiply metric X by
-metric Y, divide by 3600, sum"), a rules engine is needed. Without it,
-custom metrics are limited to simple pass-through metering. A
-[GoRules/Zen spike](https://github.com/myersCody/cost_ai_grid_poc/pull/45)
-(PR #45, not for merge) validates the approach — see
-[rating engine research](research/rating-engine-options.md) for the
-full evaluation.
+**Current status:** Custom metrics still extract and meter raw CloudEvent fields, while the rating path now supports database-backed GoRules for the implemented programmable dimensions (`catalog_item`, `instance_type`, and `tenant_tier`) with static-rate fallback. Cross-meter formulas such as multiplying two independent metering values remain future work. The original [GoRules/Zen spike](https://github.com/myersCody/cost_ai_grid_poc/pull/45) is retained as historical research; see the [rate configuration guide](rate-configuration-guide.md) for the current implementation.
 
 ---
 

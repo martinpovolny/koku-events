@@ -10,6 +10,8 @@
 > - [rating-engine-options.md](rating-engine-options.md) — GoRules/Zen evaluation
 > - [GoRules spike PR #45](https://github.com/myersCody/cost_ai_grid_poc/pull/45) — working prototype
 
+> **Historical design record:** The document’s Phase 2 GoRules plan predates the current database-backed integration. GoRules is now used for supported programmable rating dimensions; computed values combining multiple independent meters remain a separate future capability. See [Rate Configuration Guide](../rate-configuration-guide.md) for current rule storage and reload behavior.
+
 ## The Problem
 
 The built-in metering for VMs computes derived values:

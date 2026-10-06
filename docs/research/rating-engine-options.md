@@ -3,6 +3,8 @@
 > **Source:** Input from Pau (Jun 27, 2026) on rating engine alternatives
 > used in the OpenStack and open-source billing ecosystem.
 
+> **Historical design record:** This document captures the pre-integration Phase 1/Phase 2 recommendation. The current service uses GoRules/Zen in the rating path with database-backed rules and static-rate fallback; see [Rate Configuration Guide](../rate-configuration-guide.md) for the live behavior.
+
 ## Context
 
 The metering pipeline produces `metering_entries` rows:
