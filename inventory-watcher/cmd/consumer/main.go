@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -32,6 +31,7 @@ import (
 	"github.com/osac-project/cost-event-consumer/internal/ruleengine"
 	"github.com/osac-project/cost-event-consumer/internal/splunk"
 	"github.com/osac-project/cost-event-consumer/internal/watcher"
+	defaultRules "github.com/osac-project/cost-event-consumer/rules"
 )
 
 func main() {
@@ -84,37 +84,17 @@ func main() {
 		logger.Error("failed to seed default quotas", "error", err)
 		os.Exit(1)
 	}
+	if err := seedDefaultPricingRules(ctx, store, logger); err != nil {
+		logger.Error("failed to seed default pricing rules", "error", err)
+		os.Exit(1)
+	}
 
 	m := metering.New(store, cfg.MeteringInterval, logger)
 	rt := rating.New(store, cfg.RatingInterval, cfg.RatingBatchSize, logger)
 
-	if rulesDir := os.Getenv("RULES_DIR"); rulesDir != "" {
-		re := ruleengine.New(rulesDir)
-		rt.SetRuleEngine(re)
-		logger.Info("rule engine enabled", "rules_dir", rulesDir)
-
-		entries, _ := os.ReadDir(rulesDir)
-		for _, e := range entries {
-			if e.IsDir() || path.Ext(e.Name()) != ".json" {
-				continue
-			}
-			data, err := os.ReadFile(path.Join(rulesDir, e.Name())) //nolint:gosec // G703: path from os.ReadDir, not user input
-			if err != nil {
-				logger.Warn("failed to read rule file for seeding", "file", e.Name(), "error", err)
-				continue
-			}
-			name := e.Name()
-			if err := store.UpsertPricingRule(ctx, name, data); err != nil {
-				logger.Warn("failed to seed pricing rule", "name", name, "error", err)
-			} else {
-				logger.Info("seeded pricing rule from file", "name", name)
-			}
-		}
-	} else {
-		re := ruleengine.NewFromStore(store)
-		rt.SetRuleEngine(re)
-		logger.Info("rule engine enabled", "source", "database")
-	}
+	re := ruleengine.NewFromStore(store)
+	rt.SetRuleEngine(re)
+	logger.Info("rule engine enabled", "source", "database")
 
 	var w *watcher.Watcher
 	var r *reconciler.Reconciler
@@ -288,6 +268,42 @@ func main() {
 	}
 
 	logger.Info("cost-event-consumer stopped")
+}
+
+func seedDefaultPricingRules(ctx context.Context, store *inventory.Store, logger *slog.Logger) error {
+	existing, err := store.AllPricingRules(ctx)
+	if err != nil {
+		return fmt.Errorf("load existing pricing rules: %w", err)
+	}
+
+	existingNames := make(map[string]struct{}, len(existing))
+	for _, rule := range existing {
+		existingNames[rule.Name] = struct{}{}
+	}
+
+	entries, err := defaultRules.FS.ReadDir(".")
+	if err != nil {
+		return fmt.Errorf("read embedded pricing rules: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		if _, ok := existingNames[entry.Name()]; ok {
+			continue
+		}
+
+		data, err := defaultRules.FS.ReadFile(entry.Name())
+		if err != nil {
+			return fmt.Errorf("read embedded pricing rule %q: %w", entry.Name(), err)
+		}
+		if err := store.UpsertPricingRule(ctx, entry.Name(), data); err != nil {
+			return fmt.Errorf("seed pricing rule %q: %w", entry.Name(), err)
+		}
+		logger.Info("seeded default pricing rule", "name", entry.Name())
+	}
+
+	return nil
 }
 
 func safeGo(logger *slog.Logger, name string, fn func() error) func() error {

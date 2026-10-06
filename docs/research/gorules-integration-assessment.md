@@ -4,6 +4,8 @@
 > cost-event-consumer for REQ-13 (custom rate dimensions).
 > Date: 2026-06-29
 
+> **Current status (2026-10-06):** GoRules is integrated into the rating path. The runtime engine is database-backed; the JSON files under `inventory-watcher/rules/` are embedded only to seed missing database rows on first initialization.
+
 ## Go SDK
 
 Package: `github.com/gorules/zen-go`
@@ -16,39 +18,28 @@ No Rust toolchain required.
 go get github.com/gorules/zen-go
 ```
 
-## Integration Effort
-
-~80 lines of new Go code + ~80 lines of JDM JSON:
-
-**New files:**
-- `internal/rating/gorules.go` — engine init, loader, evaluation wrapper
-- `rules/pricing.json` — JDM decision table with rate rules
-
-**Changes to existing:**
-- `cmd/consumer/main.go` — initialize engine, pass to Rater (~5 lines)
-- `internal/rating/rating.go` — swap `ApplyRate()` call site (~10 lines)
-- `go.mod` — add dependency
-
 ## How It Works
 
-The SDK uses a Loader pattern — a function that resolves rule files by key:
+The service creates a Zen engine with a database-backed loader. The loader resolves rule names from an in-memory cache populated from the `pricing_rules` table:
 
 ```go
-engine := zen.NewEngine(zen.EngineConfig{
-    Loader: func(key string) ([]byte, error) {
-        return os.ReadFile(filepath.Join("./rules", key))
-    },
-})
-defer engine.Dispose()
+engine := ruleengine.NewFromStore(store)
+defer engine.Close()
 
-result, err := engine.Evaluate("pricing.json", map[string]any{
-    "value":         1500.0,
-    "resource_type": "compute_instance",
-    "meter_name":    "vm_uptime_seconds",
-    "tenant_id":     "tenant-acme",
+if _, err := engine.ReloadIfChanged(ctx); err != nil {
+	return err
+}
+
+result, err := engine.EvaluateRate("compute-pricing.json", ruleengine.PricingInput{
+	CatalogItem:  "catalog-live-vm-standard",
+	InstanceType: "standard-4-16",
+	TenantTier:   "gold",
+	Value:        1500.0,
 })
-// result: {"cost": 0.00416, "currency": "USD"}
+// result contains cost_amount, effective_rate, currency, and description.
 ```
+
+On startup, the consumer inserts the bundled JSON Decision Models only when their names are absent from `pricing_rules`. Existing database rows are never overwritten. On each rating sweep, a version check reloads the in-memory cache when a rule changes, without restarting the process.
 
 ## JDM Decision Table Example
 
@@ -127,22 +118,11 @@ Our 500-entry rating batch would process in <50ms. No concern.
 
 | Storage | Mechanism | Hot reload |
 |---------|-----------|------------|
-| File system | Load `.json` from disk, version in git | Manual restart |
-| Database | `rules` JSONB table, loader queries DB | On next eval |
-| Object storage | ZIP bundles, agent polls with etag | Atomic swap |
+| Database | `pricing_rules` JSONB table, cached by the service | On the next rating sweep after a version change |
+| Embedded defaults | Bundled `rules/*.json`, inserted only for missing rule names | Startup seed only |
 
 ## Recommendation
 
-**PoC (July 31): Don't integrate yet.** Our `ApplyRate()` is 36 lines of
-clear Go handling flat + tiered pricing. GoRules adds a CGO dependency
-and JDM learning curve with no functionality gain for current requirements.
+**Current implementation:** GoRules handles programmable dimensions such as catalog item, instance type, and tenant tier. Static SQL-backed rates remain the fallback when no matching rule exists or rule evaluation fails, preserving the existing rating path.
 
-**Post-PoC (REQ-13): Integrate.** When business users need custom rate
-formulas (different rates by GPU model, region, tenant, label values)
-without recompiling Go, GoRules with the visual editor is the right tool.
-The Loader pattern supports per-tenant rules from the database.
-
-**Migration path:** Keep `ApplyRate()` as fallback. GoRules evaluation
-wraps it — if a rule file exists for the resource type, use GoRules;
-otherwise fall back to the SQL-based rate lookup. This makes the
-transition incremental and safe.
+The CGO dependency and JDM learning curve remain deployment considerations. The database-backed loader avoids a runtime filesystem dependency and supports rule changes without rebuilding or restarting the consumer.

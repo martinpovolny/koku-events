@@ -64,7 +64,7 @@ The PoC supports four distinct rate forms across its two rating tiers:
 | **Per-Tenant Rate** | Static (`rates`) | `rates.tenant_id` | Negotiated contracts and tenant-specific discounts | Tenant `tenant-acme` pays `$0.15/hr` instead of `$0.20/hr` |
 | **Tiered (`per_event`)** | Static (`rates`) | `rates.tiers` (JSONB) | Independent graduated pricing per transaction/request | Large MaaS inference requests where tier resets each call |
 | **Tiered (`cumulative`)** | Static (`rates`) | `rates.tiers` + `rates.tier_period` | Monthly or windowed volume/capacity tiers with free allowance | First 20 GiB memory free/month, then `$0.08/GiB`, then `$0.07/GiB` |
-| **Programmable (GoRules)** | Rule Engine (Zen) | `pricing_rules` table / `rules/*.json` | Multi-factor logic, commitment agreements, and tenant tier labels | `standard-4-16` + `gold` tier label → 20% discount; CUD overage → sustained use |
+| **Programmable (GoRules)** | Rule Engine (Zen) | `pricing_rules` table | Multi-factor logic, commitment agreements, and tenant tier labels | `standard-4-16` + `gold` tier label → 20% discount; CUD overage → sustained use |
 
 ---
 
@@ -112,9 +112,9 @@ See [GoRules Decision Logic & Diagrams](research/gorules-rule-diagrams.md) for f
 
 ### Storage & Hot-Reloading
 
-GoRules rules can be supplied in two ways. The CRC deployment uses the database-backed path; `RULES_DIR` is retained for the original local file-based experiment and is not configured in the cluster:
-1. **File-based:** Point `RULES_DIR=rules` to a directory of `.json` JDM files.
-2. **Database-backed (`pricing_rules` table):**
+GoRules uses the database-backed `pricing_rules` table. The bundled JDM files seed missing rows when a new database is initialized; existing rows are never overwritten on restart, so database edits remain authoritative:
+
+1. **Database-backed (`pricing_rules` table):**
    ```sql
    CREATE TABLE pricing_rules (
        id         BIGSERIAL PRIMARY KEY,
