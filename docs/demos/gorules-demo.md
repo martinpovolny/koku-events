@@ -3,6 +3,8 @@
 > Recorded demo — instance-type pricing and committed-use discounts
 > using a JSON decision engine. No code changes for pricing updates.
 
+> **Historical artifact:** This recording captured the original file-backed workflow. It no longer runs verbatim because `RULES_DIR` was removed. The current service starts with `./inventory-watcher`, seeds missing bundled rules into the `pricing_rules` database table, and hot-reloads edits made to that table without a restart. See [Rate Configuration Guide](../rate-configuration-guide.md) for the current workflow.
+
 ## Prerequisites
 
 ```bash
@@ -16,13 +18,13 @@ OSAC + PostgreSQL running, token fresh in `/tmp/osac_token.txt`.
 
 ## Setup
 
-Start the consumer. The rule engine is always database-backed:
+Start the consumer with rule engine enabled:
 
 ```bash
-./inventory-watcher
+RULES_DIR=rules ./inventory-watcher
 ```
 
-The log should show: `rule engine enabled source=database`. On a new database, the bundled JDMs are inserted into `pricing_rules`; existing database rules are left unchanged.
+Log should show: `rule engine enabled rules_dir=rules`
 
 Open two browser windows:
 1. **Debug dashboard**: http://localhost:8020/debug/dashboard
@@ -45,7 +47,7 @@ standard-4-16 + standard → $0.20/hr, 0% off  = $0.20 effective
 standard-8-32 + gold     → $0.40/hr, 20% off = $0.32 effective
 ```
 
-Key point: "This is a JSON decision model stored in the database. Not Go code. An operator can update the rule row and the rating worker hot-reloads it. No binary rebuild or process restart is required."
+Key point: "This is a JSON file. Not Go code. An operator edits it, restarts, and pricing changes. No PR. No recompile."
 
 Then show `rules/committed-use-pricing.json` — the 3-node graph:
 
@@ -91,16 +93,10 @@ In the **GoRules demo page** (http://localhost:8020/demo/gorules):
 
 ### Part 3: Change the rules live (most powerful moment)
 
-1. Copy the current JDM, edit the gold discount from 20% to 40%, and update the database row. For example:
-
-   ```bash
-   RULE_JSON="$(jq -c . rules/compute-pricing.json)"
-   psql "$INVENTORY_DB_URL" -v ON_ERROR_STOP=1 --set=rule_json="$RULE_JSON" --command="UPDATE pricing_rules SET rule_json = :'rule_json'::jsonb WHERE name = 'compute-pricing.json'"
-   ```
-
-   In a live demo, make the edit in a copy of `rules/compute-pricing.json` before running the command; editing the bundled file alone does not change an existing database row.
-2. Wait for the next rating sweep; the database-backed engine detects the version change and reloads the rule.
-3. Show the cost report again — gold tenant costs dropped further.
+1. Edit `rules/compute-pricing.json` — change gold discount from 20% to 40%
+2. Restart the consumer: `RULES_DIR=rules ./inventory-watcher`
+3. Wait for the next rating sweep
+4. Show the cost report again — gold tenant costs dropped further
 
 "Pricing change in 30 seconds. No developer needed."
 
