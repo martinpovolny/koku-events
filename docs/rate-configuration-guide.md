@@ -16,55 +16,51 @@ How pricing works in the Cost Management PoC: rate forms, the two-tier rating ar
 
 ## 1. Rating Architecture Overview
 
-The rating engine in `inventory-watcher/internal/rating/rating.go` converts unrated `metering_entries` into billable `cost_entries`. It operates as a **two-tier architecture**:
+The rating engine in `inventory-watcher/internal/rating/rating.go` converts unrated `metering_entries` into billable `cost_entries`. It operates as a **unified, multi-model rating architecture**:
 
 ```
                          Unrated Metering Entry
                                   │
                                   ▼
-               ┌──────────────────────────────────────┐
-               │ Tier 1: Programmable Decision Engine │
-               │   (GoRules / Zen JSON Decision Graph)│
-               └──────────────────┬───────────────────┘
+                     Rate Card Matching (rates table)
+                  (Tenant + Catalog > Catalog > Tenant + SKU > ...)
                                   │
-                       Matched? ──┴── No / Error / Unconfigured
-                          │                       │
-                         Yes                      ▼
-                          │         ┌───────────────────────────┐
-                          │         │ Tier 2: Static Rate Cards │
-                          │         │     (PostgreSQL rates)    │
-                          │         └─────────────┬─────────────┘
-                          │                       │
-                          │            4-way Fallback Match
-                          │            (Tenant + SKU > SKU > ...)
-                          │                       │
-                          ▼                       ▼
-                    Calculate Cost          Calculate Cost
-                  (Rules Expression)     (Flat / Tier Waterfall)
-                          │                       │
-                          └───────────┬───────────┘
-                                      │
-                                      ▼
-                            Insert Cost Entry
-                            (PostgreSQL cost_entries)
+                                  ▼
+                      Which Execution Model?
+              ┌───────────────────┼───────────────────┐
+              ▼                   ▼                   ▼
+      Model 1: GoRule      Model 2: Tiered      Model 3: Flat / Simple
+     (rate.rule_name)       (rate.tiers)         (price_per_unit)
+              │                   │                   │
+    Zen Decision Engine   Graduated Waterfall   Direct Linear
+    (Decision Table /     (cumulative window    (unit × price)
+     Expressions)          or per-event)              │
+              │                   │                   │
+              └───────────────────┼───────────────────┘
+                                  │
+                                  ▼
+                          Insert Cost Entry
+                      (PostgreSQL cost_entries)
 ```
 
-1. **Tier 1 (Programmable Decision Engine):** Evaluated first via `r.tryRuleEngine()`. If a matching rule exists (e.g. `compute-pricing.json`), GoRules evaluates multi-dimensional policies (e.g. instance type combined with tenant tier discounts or committed-use utilization brackets).
-2. **Tier 2 (Static Rate Cards):** If no programmable rule matches or GoRules is disabled, the rating sweep falls back to `matchRate()` on the `rates` table using a 4-way fallback hierarchy. Cost is computed using either flat multiplication or graduated tier waterfalls.
+1. **Rate Card Precedence:** The rating sweep finds the most specific rate card matching the metering entry (Tenant + Catalog Item > Catalog Item > Tenant + Machine Type > Machine Type > Tenant Default > Global Default).
+2. **Model 1: Rate-Bound GoRule (`rate.rule_name != ""`):** If the matched rate card specifies a GoRule decision model (e.g. `compute-pricing.json`), the Zen decision engine executes that model using the entry's dimensions (`instance_type`, `catalog_item`, `tenant_tier`, `value`). The resulting cost entry is tagged with `RateID: rate.ID`.
+3. **Legacy Fallback GoRule:** If no rate-bound rule was specified, the engine evaluates global decision models (such as `compute-pricing.json`) for backward compatibility.
+4. **Model 2: Tiered Rating (`len(rate.tiers) > 0`):** Computes cost using graduated price brackets either per-event or cumulatively across a rolling window (e.g. monthly).
+5. **Model 3: Flat / Simple Rate:** Direct linear calculation (`value * price_per_unit`).
 
 ---
 
 ## 2. Rate Forms & Capabilities Comparison
 
-The PoC supports four distinct rate forms across its two rating tiers:
+The PoC supports three unified rate execution models configured on rate cards:
 
-| Rate Form | Engine Layer | Stored In | Best Used For | Example |
+| Rate Model | Configured Via | Stored In | Best Used For | Example |
 | :--- | :--- | :--- | :--- | :--- |
-| **Flat Rate** | Static (`rates`) | `rates.price_per_unit` | Direct linear pricing per SKU or meter unit | `$0.20 / VM-hour`, `$1.50 / M tokens` |
-| **Per-Tenant Rate** | Static (`rates`) | `rates.tenant_id` | Negotiated contracts and tenant-specific discounts | Tenant `tenant-acme` pays `$0.15/hr` instead of `$0.20/hr` |
-| **Tiered (`per_event`)** | Static (`rates`) | `rates.tiers` (JSONB) | Independent graduated pricing per transaction/request | Large MaaS inference requests where tier resets each call |
-| **Tiered (`cumulative`)** | Static (`rates`) | `rates.tiers` + `rates.tier_period` | Monthly or windowed volume/capacity tiers with free allowance | First 20 GiB memory free/month, then `$0.08/GiB`, then `$0.07/GiB` |
-| **Programmable (GoRules)** | Rule Engine (Zen) | `pricing_rules` table | Multi-factor logic, commitment agreements, and tenant tier labels | `standard-4-16` + `gold` tier label → 20% discount; CUD overage → sustained use |
+| **Flat / Simple** | `price_per_unit` | `rates.price_per_unit` | Direct linear pricing per SKU or meter unit | `$0.20 / VM-hour`, `$1.50 / M tokens` |
+| **Tiered (JSON)** | `tiers`, `tier_mode`, `tier_period` | `rates.tiers` (JSONB) | Graduated brackets, volume pricing, free tiers | First 20 GiB free/month, then `$0.08/GiB`, then `$0.07/GiB` |
+| **GoRule (Programmable)** | `rule_name` | `rates.rule_name` + `pricing_rules` | Multi-factor logic, tenant tier labels, commitment agreements | `standard-4-16` + `gold` tier label $\rightarrow$ 20% discount; CUD brackets |
+
 
 ---
 
@@ -273,16 +269,20 @@ Rates can be managed using three interfaces depending on the workflow:
 
 ### 1. Interactive Web UI (`/ui/rates`)
 
-The embedded Catalog & Rates tool at `http://localhost:8020/ui/rates` provides a browser-based management interface:
+The embedded Catalog & Rates tool at `http://localhost:8020/ui/rates` provides a browser-based management interface supporting all three rate models:
 - **Synchronized Catalog View:** Lists machine instance types (vCPU, memory GiB) and OSAC catalog offerings.
-- **Assigned Rate Status:** Shows the effective rate card assigned to each sizing spec.
-- **Inline Rate Assignment Modal:** Allows selecting a catalog SKU, specifying an hourly rate ($/hr) or direct unit rate, adding descriptions, and configuring cost types.
-- **Active Rate Cards Table:** Displays all active rates, their fallback precedence, and provides single-click **Delete** buttons.
+- **Assigned Rate Status:** Shows the effective rate card assigned to each sizing spec, including GoRule badges (`GoRule: compute-pricing.json`) and Tiered badges (`Tiered (3 bands)`).
+- **3-Way Pricing Model Modal:** When assigning or adding a rate, operators select between:
+  1. **Flat / Simple Rate:** Configure $/hr or direct unit rate with instant conversion preview.
+  2. **Tiered (JSON):** Choose accumulation window (`per_event`, `monthly`, `daily`), select pre-made bracket templates (e.g. Free Tier allowance, Graduated discount), and edit/validate raw JSON bands in real time.
+  3. **GoRule Decision Model:** Select an uploaded decision graph (e.g. `compute-pricing.json`) to evaluate multi-factor rules dynamically.
+- **Active Rate Cards Table:** Displays all active rates, their fallback precedence, model type, and provides single-click **Delete** buttons.
+- **GoRules Decision Models Tab:** Browse uploaded decision graphs, view formatted JSON, create or update rules in-browser, and inspect revision history with hot-reload status.
 - **CSV Export:** One-click download of the complete active rate card table.
 
-### 2. REST API (`/api/v1/rates`)
+### 2. REST API (`/api/v1/rates` & `/api/v1/rules`)
 
-The REST API enables programmatic rate card management (defined in `docs/openapi.yaml`):
+The REST API enables programmatic rate card and decision rule management (defined in `docs/openapi.yaml`):
 
 #### List Rates
 ```http
@@ -292,7 +292,7 @@ Host: localhost:8020
 * **Filter by tenant:** `GET /api/v1/rates?tenant_id=tenant-acme` returns tenant-specific overrides plus global defaults.
 * **CSV export:** `GET /api/v1/rates?format=csv` downloads rate cards as a CSV file.
 
-#### Create or Update Rate
+#### Create Rate (Flat)
 ```http
 POST /api/v1/rates HTTP/1.1
 Host: localhost:8020
@@ -304,9 +304,25 @@ Content-Type: application/json
   "instance_type": "standard-4-16",
   "meter_name": "vm_uptime_seconds",
   "cost_type": "Infrastructure",
-  "price_per_unit": 0.00005555555555555556,
+  "price_per_unit": "0.00005555555555555556",
   "currency": "USD",
   "description": "Standard 4-core 16GB VM ($0.20/hour)"
+}
+```
+
+#### Create Rate (GoRule Decision Model)
+```http
+POST /api/v1/rates HTTP/1.1
+Host: localhost:8020
+Content-Type: application/json
+
+{
+  "resource_type": "compute_instance",
+  "catalog_item": "vm-standard",
+  "meter_name": "vm_uptime_seconds",
+  "rule_name": "compute-pricing.json",
+  "price_per_unit": "0",
+  "description": "Dynamic pricing with tenant tier discounts"
 }
 ```
 
@@ -316,12 +332,18 @@ DELETE /api/v1/rates/12 HTTP/1.1
 Host: localhost:8020
 ```
 
+#### Manage GoRules Decision Models (`/api/v1/rules`)
+* **List rules:** `GET /api/v1/rules` returns all decision models stored in database.
+* **Get rule JSON:** `GET /api/v1/rules/compute-pricing.json` returns model definition.
+* **Upload/Update rule:** `POST /api/v1/rules` with `{"name": "my-rule.json", "rule_json": {...}}`.
+* **Delete rule:** `DELETE /api/v1/rules/my-rule.json`.
+
 ### 3. Bruno API Collection
 
 Ready-to-run requests are checked into the repository under [`bruno-collection/Rates/`](../bruno-collection/):
 - **`List Rates (JSON)`**: Fetches all rates with optional tenant filtering.
 - **`List Rates (CSV)`**: Downloads the active rate table as CSV.
-- **`Create Rate`**: Post a new rate definition with pre-calculated unit prices.
+- **`Create Rate`**: Post a new rate definition with pre-calculated unit prices or rule assignments.
 - **`Delete Rate`**: Delete a rate card by ID.
 
 ---
@@ -344,6 +366,7 @@ rates
 ├── tier_mode       TEXT NOT NULL -- 'per_event' or 'cumulative'
 ├── tier_period     TEXT NOT NULL -- Window for cumulative tiers: 'monthly', '5h', etc.
 ├── description     TEXT NOT NULL
+├── rule_name       TEXT NOT NULL -- Optional GoRules decision model name (e.g. 'compute-pricing.json')
 ├── effective_from  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 └── effective_to    TIMESTAMPTZ   -- NULL = indefinitely active
 
@@ -355,3 +378,4 @@ pricing_rules
 ├── created_at      TIMESTAMPTZ NOT NULL
 └── updated_at      TIMESTAMPTZ NOT NULL
 ```
+

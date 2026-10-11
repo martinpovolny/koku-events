@@ -607,6 +607,9 @@ type CreateRateRequest struct {
 
 	// Tiers Optional tiered pricing tiers
 	Tiers *[]Tier `json:"tiers,omitempty"`
+
+	// RuleName Optional GoRules decision model name (e.g. compute-pricing.json)
+	RuleName *string `json:"rule_name,omitempty"`
 }
 
 // CreateWalletRequest defines model for CreateWalletRequest.

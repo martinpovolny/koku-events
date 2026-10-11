@@ -12,6 +12,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/osac-project/cost-event-consumer/internal/inventory"
+	"github.com/osac-project/cost-event-consumer/internal/ruleengine"
 )
 
 var (
@@ -664,3 +665,111 @@ func TestEvaluateThresholds_MonetaryBudget(t *testing.T) {
 		t.Error("90% budget threshold should NOT fire at $800/$1000")
 	}
 }
+
+func TestSweep_RateBoundGoRule(t *testing.T) {
+	ctx := context.Background()
+
+	// Clean up unrated entries from prior test runs
+	testStore.Pool().Exec(ctx, `UPDATE metering_entries SET rated_at = NOW() WHERE rated_at IS NULL`)
+
+	// Load compute-pricing.json rule into store
+	ruleData, err := os.ReadFile("../../rules/compute-pricing.json")
+	if err != nil {
+		ruleData, err = os.ReadFile("../rules/compute-pricing.json")
+		if err != nil {
+			ruleData, err = os.ReadFile("rules/compute-pricing.json")
+			if err != nil {
+				t.Fatalf("read compute-pricing.json: %v", err)
+			}
+		}
+	}
+	if err := testStore.UpsertPricingRule(ctx, "compute-pricing.json", ruleData); err != nil {
+		t.Fatalf("upsert pricing rule: %v", err)
+	}
+
+	re := ruleengine.NewFromStore(testStore)
+	if _, err := re.ReloadIfChanged(ctx); err != nil {
+		t.Fatalf("reload rule engine: %v", err)
+	}
+
+	ts := time.Now().UnixNano()
+	resourceID := fmt.Sprintf("gorule-vm-%d", ts)
+	tenantID := fmt.Sprintf("gorule-tenant-%d", ts)
+	catalogItem := fmt.Sprintf("cat-gorule-%d", ts)
+	meterName := "vm_uptime_seconds"
+	effectiveFrom := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
+	periodStart := now.Add(-3600 * time.Second)
+
+	// Create compute instance in inventory
+	if err := testStore.UpsertComputeInstance(ctx, inventory.ComputeInstanceRecord{
+		InstanceID:   resourceID,
+		Name:         resourceID,
+		Tenant:       tenantID,
+		InstanceType: "standard-2-8",
+		CatalogItem:  catalogItem,
+		Cores:        2,
+		MemoryGiB:    8,
+		State:        "running",
+		CreatedAt:    periodStart,
+		LastUpdated:  now,
+	}); err != nil {
+		t.Fatalf("upsert compute instance: %v", err)
+	}
+
+	// Insert a rate linked to GoRule compute-pricing.json
+	insertedRateID, err := testStore.UpsertRate(ctx, inventory.RateRecord{
+		ResourceType:  "compute_instance",
+		CatalogItem:   catalogItem,
+		MeterName:     meterName,
+		CostType:      "Infrastructure",
+		PricePerUnit:  decimal.Zero,
+		RuleName:      "compute-pricing.json",
+		Currency:      "USD",
+		EffectiveFrom: effectiveFrom,
+	})
+	if err != nil {
+		t.Fatalf("upsert rate: %v", err)
+	}
+
+	// Insert metering entry for 3600 seconds
+	if err := testStore.InsertMeteringEntry(ctx, inventory.MeteringEntry{
+		ResourceType: "compute_instance",
+		ResourceID:   resourceID,
+		TenantID:     tenantID,
+		CatalogItem:  catalogItem,
+		InstanceType: "standard-2-8",
+		MeterName:    meterName,
+		Value:        3600.0,
+		Unit:         "seconds",
+		PeriodStart:  periodStart,
+		PeriodEnd:    now,
+	}); err != nil {
+		t.Fatalf("insert metering entry: %v", err)
+	}
+
+	rater := New(testStore, 30*time.Second, 500, testLogger)
+	rater.SetRuleEngine(re)
+	rater.sweep(ctx)
+
+	// Verify cost entry was created with RateID and correct cost ($0.10 for 1h standard-2-8)
+	var count int
+	var costAmount float64
+	var actualRateID int64
+	err = testStore.Pool().QueryRow(ctx,
+		"SELECT count(*), COALESCE(sum(cost_amount), 0), COALESCE(max(rate_id), 0) FROM cost_entries WHERE resource_id = $1",
+		resourceID).Scan(&count, &costAmount, &actualRateID)
+	if err != nil {
+		t.Fatalf("query cost entries: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 cost entry, got %d", count)
+	}
+	if actualRateID != insertedRateID {
+		t.Errorf("expected cost entry rate_id %d, got %d", insertedRateID, actualRateID)
+	}
+	if costAmount != 0.10 {
+		t.Errorf("expected cost amount 0.10, got %f", costAmount)
+	}
+}
+

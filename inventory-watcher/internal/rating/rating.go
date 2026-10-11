@@ -100,6 +100,16 @@ func (r *Rater) sweep(ctx context.Context) {
 		var ratedIDs []int64
 
 		for _, me := range entries {
+			rate := matchRate(rateIndex, me.TenantID, me.CatalogItem, me.InstanceType, me.ResourceType, me.MeterName)
+			if rate != nil && rate.RuleName != "" {
+				if ce, ok := r.evalRuleRate(ctx, me, *rate); ok {
+					costEntries = append(costEntries, ce)
+					ratedIDs = append(ratedIDs, me.ID)
+					metrics.CostEntriesCreated.WithLabelValues(me.ResourceType, "RuleEngine").Inc()
+					continue
+				}
+			}
+
 			if ce, ok := r.tryRuleEngine(ctx, me); ok {
 				costEntries = append(costEntries, ce)
 				ratedIDs = append(ratedIDs, me.ID)
@@ -107,7 +117,6 @@ func (r *Rater) sweep(ctx context.Context) {
 				continue
 			}
 
-			rate := matchRate(rateIndex, me.TenantID, me.CatalogItem, me.InstanceType, me.ResourceType, me.MeterName)
 			if rate == nil {
 				totalSkipped++
 				ratedIDs = append(ratedIDs, me.ID)
@@ -193,7 +202,62 @@ func (r *Rater) sweep(ctx context.Context) {
 	r.DeductWallets(ctx)
 }
 
-// DeductWallets applies unapplied cost entries to tenant wallets.
+// evalRuleRate evaluates a specific GoRules decision model bound to a rate card.
+func (r *Rater) evalRuleRate(ctx context.Context, me inventory.MeteringEntry, rate inventory.RateRecord) (inventory.CostEntry, bool) {
+	if r.rules == nil || rate.RuleName == "" {
+		return inventory.CostEntry{}, false
+	}
+
+	instanceType := me.InstanceType
+	tenantTier := ""
+	if me.ResourceType == "compute_instance" {
+		inst, err := r.store.GetComputeInstance(ctx, me.ResourceID)
+		if err == nil && inst != nil {
+			if instanceType == "" {
+				instanceType = inst.InstanceType
+			}
+			tenantTier = r.store.TenantTier(ctx, me.TenantID)
+		}
+	} else if me.TenantID != "" {
+		tenantTier = r.store.TenantTier(ctx, me.TenantID)
+	}
+
+	output, err := r.rules.EvaluateRate(rate.RuleName, ruleengine.PricingInput{
+		InstanceType: instanceType,
+		CatalogItem:  me.CatalogItem,
+		TenantTier:   tenantTier,
+		TenantID:     me.TenantID,
+		ResourceType: me.ResourceType,
+		MeterName:    me.MeterName,
+		Value:        me.Value,
+	})
+	if err != nil {
+		r.logger.Warn("rule engine evaluation failed for rate card, falling back to static rate",
+			"rule", rate.RuleName, "rate_id", rate.ID, "resource", me.ResourceID, "error", err)
+		return inventory.CostEntry{}, false
+	}
+
+	r.logger.Debug("rule rate evaluated entry",
+		"resource", me.ResourceID, "rule", rate.RuleName, "rate_id", rate.ID,
+		"cost", output.CostAmount, "effective_rate", output.EffectiveRate)
+
+	return inventory.CostEntry{
+		MeteringEntryID: me.ID,
+		RateID:          rate.ID,
+		TenantID:        me.TenantID,
+		ProjectID:       me.ProjectID,
+		UserID:          me.UserID,
+		ResourceType:    me.ResourceType,
+		ResourceID:      me.ResourceID,
+		MeterName:       me.MeterName,
+		MeteredValue:    me.Value,
+		CostAmount:      decimal.NewFromFloat(output.CostAmount),
+		Currency:        output.Currency,
+		PeriodStart:     me.PeriodStart,
+		PeriodEnd:       me.PeriodEnd,
+	}, true
+}
+
 func (r *Rater) tryRuleEngine(ctx context.Context, me inventory.MeteringEntry) (inventory.CostEntry, bool) {
 	if r.rules == nil {
 		return inventory.CostEntry{}, false

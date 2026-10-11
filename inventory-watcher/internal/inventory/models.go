@@ -160,6 +160,7 @@ type RateRecord struct {
 	TierMode      string          `json:"tier_mode"`
 	TierPeriod    string          `json:"tier_period"`
 	Description   string          `json:"description"`
+	RuleName      string          `json:"rule_name"`
 	EffectiveFrom time.Time       `json:"effective_from"`
 	EffectiveTo   *time.Time      `json:"effective_to"`
 }

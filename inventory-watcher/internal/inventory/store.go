@@ -267,6 +267,7 @@ CREATE TABLE IF NOT EXISTS rates (
     currency       TEXT NOT NULL DEFAULT 'USD',
     tiers          JSONB,
     description    TEXT NOT NULL DEFAULT '',
+    rule_name      TEXT NOT NULL DEFAULT '',
     effective_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     effective_to   TIMESTAMPTZ
 );
@@ -366,6 +367,7 @@ CREATE INDEX IF NOT EXISTS idx_me_unrated ON metering_entries (id) WHERE rated_a
 -- tier_mode and tier_period on rates for cumulative/windowed tier pricing (REQ-11)
 ALTER TABLE rates ADD COLUMN IF NOT EXISTS tier_mode TEXT NOT NULL DEFAULT 'per_event';
 ALTER TABLE rates ADD COLUMN IF NOT EXISTS tier_period TEXT NOT NULL DEFAULT '';
+ALTER TABLE rates ADD COLUMN IF NOT EXISTS rule_name TEXT NOT NULL DEFAULT '';
 
 -- quota CRUD fields (REQ-9)
 ALTER TABLE quotas ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '';
@@ -1206,11 +1208,11 @@ func (s *Store) UpsertRate(ctx context.Context, rec RateRecord) (int64, error) {
 	var id int64
 	err = tx.QueryRow(ctx, `
 		INSERT INTO rates
-			(tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type, price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			(tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type, price_per_unit, currency, tiers, tier_mode, tier_period, description, rule_name, effective_from, effective_to)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		RETURNING id
 	`, rec.TenantID, rec.ResourceType, rec.CatalogItem, rec.InstanceType, rec.MeterName, rec.KokuMetric, rec.CostType,
-		rec.PricePerUnit, rec.Currency, tiersJSON, rec.TierMode, rec.TierPeriod, rec.Description,
+		rec.PricePerUnit, rec.Currency, tiersJSON, rec.TierMode, rec.TierPeriod, rec.Description, rec.RuleName,
 		rec.EffectiveFrom, rec.EffectiveTo).Scan(&id)
 
 	if err != nil {
@@ -1229,14 +1231,14 @@ func (s *Store) GetRate(ctx context.Context, id int64) (*RateRecord, error) {
 
 	err := s.db.QueryRow(ctx, `
 		SELECT id, tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type,
-		       price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to
+		       price_per_unit, currency, tiers, tier_mode, tier_period, description, rule_name, effective_from, effective_to
 		FROM rates
 		WHERE id = $1
 	`, id).Scan(
 		&rec.ID, &rec.TenantID, &rec.ResourceType, &rec.CatalogItem, &rec.InstanceType, &rec.MeterName,
 		&rec.KokuMetric, &rec.CostType,
 		&rec.PricePerUnit, &rec.Currency, &tiersJSON, &rec.TierMode, &rec.TierPeriod, &rec.Description,
-		&rec.EffectiveFrom, &rec.EffectiveTo)
+		&rec.RuleName, &rec.EffectiveFrom, &rec.EffectiveTo)
 	if err != nil {
 		return nil, err
 	}
@@ -1272,7 +1274,7 @@ func (s *Store) FindRate(ctx context.Context, tenantID, resourceType, catalogIte
 
 	err := s.db.QueryRow(ctx, `
 		SELECT id, tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type,
-		       price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to
+		       price_per_unit, currency, tiers, tier_mode, tier_period, description, rule_name, effective_from, effective_to
 		FROM rates
 		WHERE resource_type = $1 AND meter_name = $2
 		  AND effective_from <= $3
@@ -1288,7 +1290,7 @@ func (s *Store) FindRate(ctx context.Context, tenantID, resourceType, catalogIte
 		&rec.ID, &rec.TenantID, &rec.ResourceType, &rec.CatalogItem, &rec.InstanceType, &rec.MeterName,
 		&rec.KokuMetric, &rec.CostType,
 		&rec.PricePerUnit, &rec.Currency, &tiersJSON, &rec.TierMode, &rec.TierPeriod, &rec.Description,
-		&rec.EffectiveFrom, &rec.EffectiveTo)
+		&rec.RuleName, &rec.EffectiveFrom, &rec.EffectiveTo)
 
 	if err != nil {
 		return nil, err
@@ -1345,7 +1347,7 @@ func (s *Store) MarkMeteringEntriesRated(ctx context.Context, ids []int64) error
 func (s *Store) AllActiveRates(ctx context.Context, at time.Time) ([]RateRecord, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id, tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type,
-		       price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to
+		       price_per_unit, currency, tiers, tier_mode, tier_period, description, rule_name, effective_from, effective_to
 		FROM rates
 		WHERE effective_from <= $1
 		  AND (effective_to IS NULL OR effective_to > $1)
@@ -1362,7 +1364,7 @@ func (s *Store) AllActiveRates(ctx context.Context, at time.Time) ([]RateRecord,
 		var tiersJSON []byte
 		if err := rows.Scan(&r.ID, &r.TenantID, &r.ResourceType, &r.CatalogItem, &r.InstanceType, &r.MeterName,
 			&r.KokuMetric, &r.CostType, &r.PricePerUnit, &r.Currency, &tiersJSON,
-			&r.TierMode, &r.TierPeriod, &r.Description, &r.EffectiveFrom, &r.EffectiveTo); err != nil {
+			&r.TierMode, &r.TierPeriod, &r.Description, &r.RuleName, &r.EffectiveFrom, &r.EffectiveTo); err != nil {
 			return nil, err
 		}
 		if tiersJSON != nil {
@@ -1378,7 +1380,7 @@ func (s *Store) AllActiveRates(ctx context.Context, at time.Time) ([]RateRecord,
 // ListRates returns all rates, optionally filtered by tenant_id.
 func (s *Store) ListRates(ctx context.Context, tenantID string) ([]RateRecord, error) {
 	q := `SELECT id, tenant_id, resource_type, catalog_item, instance_type, meter_name, koku_metric, cost_type,
-	             price_per_unit, currency, tiers, tier_mode, tier_period, description, effective_from, effective_to
+	             price_per_unit, currency, tiers, tier_mode, tier_period, description, rule_name, effective_from, effective_to
 	      FROM rates`
 
 	var args []interface{}
@@ -1400,7 +1402,7 @@ func (s *Store) ListRates(ctx context.Context, tenantID string) ([]RateRecord, e
 		var tiersJSON []byte
 		if err := rows.Scan(&r.ID, &r.TenantID, &r.ResourceType, &r.CatalogItem, &r.InstanceType, &r.MeterName,
 			&r.KokuMetric, &r.CostType, &r.PricePerUnit, &r.Currency, &tiersJSON,
-			&r.TierMode, &r.TierPeriod, &r.Description, &r.EffectiveFrom, &r.EffectiveTo); err != nil {
+			&r.TierMode, &r.TierPeriod, &r.Description, &r.RuleName, &r.EffectiveFrom, &r.EffectiveTo); err != nil {
 			return nil, err
 		}
 		if tiersJSON != nil {
@@ -2345,4 +2347,12 @@ func (s *Store) PricingRulesVersion(ctx context.Context) (int64, error) {
 	var v int64
 	err := s.db.QueryRow(ctx, `SELECT COALESCE(SUM(version), 0) FROM pricing_rules`).Scan(&v)
 	return v, err
+}
+
+func (s *Store) DeletePricingRule(ctx context.Context, name string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `DELETE FROM pricing_rules WHERE name = $1`, name)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
