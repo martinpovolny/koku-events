@@ -2074,7 +2074,6 @@ func (h *APIHandler) GetRatesUI(w http.ResponseWriter, r *http.Request) {
 // as well as custom GoRules API endpoints:
 //   - GET /reports -> /ui/reports
 //   - GET /rates -> /ui/rates
-//   - /api/v1/rules endpoints
 //
 // These are always registered so existing bookmarks and links continue to work
 // regardless of whether the debug dashboard is enabled.
@@ -2085,7 +2084,6 @@ func (h *APIHandler) RegisterLegacyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /rates", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/rates", http.StatusMovedPermanently)
 	})
-	h.RegisterRuleRoutes(mux)
 }
 
 // UpsertRuleRequest defines the payload for creating or updating a GoRules decision model.
@@ -2106,8 +2104,10 @@ func (h *APIHandler) ListRules(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetRule returns a single GoRules decision model by name.
-func (h *APIHandler) GetRule(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+func (h *APIHandler) GetRule(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" {
+		name = r.PathValue("name")
+	}
 	if name == "" {
 		writeErrorJSON(w, "rule name is required", http.StatusBadRequest)
 		return
@@ -2160,8 +2160,10 @@ func (h *APIHandler) CreateOrUpdateRule(w http.ResponseWriter, r *http.Request) 
 }
 
 // DeleteRule deletes a GoRules decision model by name.
-func (h *APIHandler) DeleteRule(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+func (h *APIHandler) DeleteRule(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" {
+		name = r.PathValue("name")
+	}
 	if name == "" {
 		writeErrorJSON(w, "rule name is required", http.StatusBadRequest)
 		return
@@ -2177,14 +2179,6 @@ func (h *APIHandler) DeleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// RegisterRuleRoutes registers REST endpoints for GoRules decision model management.
-func (h *APIHandler) RegisterRuleRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/rules", h.ListRules)
-	mux.HandleFunc("GET /api/v1/rules/{name}", h.GetRule)
-	mux.HandleFunc("POST /api/v1/rules", h.CreateOrUpdateRule)
-	mux.HandleFunc("DELETE /api/v1/rules/{name}", h.DeleteRule)
 }
 
 // RegisterDebugRoutes registers debug-only routes (e.g. legacy redirect for debug dashboard).

@@ -2852,8 +2852,14 @@ func TestRulesAPI_CRUD(t *testing.T) {
 	}
 
 	// Deleting again should return 404
-	delReqAgain, _ := http.NewRequest(http.MethodDelete, testServer.URL+"/api/v1/rules/test-rule.json", nil)
-	delRespAgain, _ := http.DefaultClient.Do(delReqAgain)
+	delReqAgain, err := http.NewRequest(http.MethodDelete, testServer.URL+"/api/v1/rules/test-rule.json", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	delRespAgain, err := http.DefaultClient.Do(delReqAgain)
+	if err != nil {
+		t.Fatalf("second DELETE rule: %v", err)
+	}
 	defer delRespAgain.Body.Close()
 	if delRespAgain.StatusCode != http.StatusNotFound {
 		t.Errorf("second DELETE rule status = %d, want 404", delRespAgain.StatusCode)
