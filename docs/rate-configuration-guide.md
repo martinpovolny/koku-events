@@ -43,11 +43,10 @@ The rating engine in `inventory-watcher/internal/rating/rating.go` converts unra
                       (PostgreSQL cost_entries)
 ```
 
-1. **Rate Card Precedence:** The rating sweep finds the most specific rate card matching the metering entry (Tenant + Catalog Item > Catalog Item > Tenant + Machine Type > Machine Type > Tenant Default > Global Default).
-2. **Model 1: Rate-Bound GoRule (`rate.rule_name != ""`):** If the matched rate card specifies a GoRule decision model (e.g. `compute-pricing.json`), the Zen decision engine executes that model using the entry's dimensions (`instance_type`, `catalog_item`, `tenant_tier`, `value`). The resulting cost entry is tagged with `RateID: rate.ID`.
-3. **Legacy Fallback GoRule:** If no rate-bound rule was specified, the engine evaluates global decision models (such as `compute-pricing.json`) for backward compatibility.
-4. **Model 2: Tiered Rating (`len(rate.tiers) > 0`):** Computes cost using graduated price brackets either per-event or cumulatively across a rolling window (e.g. monthly).
-5. **Model 3: Flat / Simple Rate:** Direct linear calculation (`value * price_per_unit`).
+1. **Rate Card Precedence:** The rating sweep finds the most specific rate card matching the metering entry (Tenant + Catalog Item > Catalog Item > Tenant + Machine Type > Machine Type > Tenant Default > Global Default). If no rate card matches, the entry is skipped with a logged warning.
+2. **Model 1: Rate-Bound GoRule (`rate.rule_name != ""`):** If the matched rate card specifies a GoRule decision model (e.g. `compute-pricing.json`), the Zen decision engine executes that model using the entry's dimensions (`instance_type`, `catalog_item`, `tenant_tier`, `tenant_id`, `resource_type`, `meter_name`, `value`). The resulting cost entry is tagged with `RateID: rate.ID`.
+3. **Model 2: Tiered Rating (`len(rate.tiers) > 0`):** Computes cost using graduated price brackets either per-event or cumulatively across a rolling window (e.g. monthly).
+4. **Model 3: Flat / Simple Rate:** Direct linear calculation (`value * price_per_unit`).
 
 ---
 

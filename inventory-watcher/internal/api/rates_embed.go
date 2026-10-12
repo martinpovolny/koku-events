@@ -296,6 +296,106 @@ const ratesHTML = `<!DOCTYPE html>
         </tbody>
       </table>
     </div>
+
+    <!-- Production Rules & Authoring Guide -->
+    <div class="card" style="margin-top: 1.5rem;">
+      <div class="card-header" style="background:#f8fafc;">
+        <div>
+          <strong>Production Decision Models &amp; Authoring Guide</strong>
+          <span style="font-weight:normal; color:var(--muted); font-size:0.82rem; margin-left:0.5rem;">
+            Deep-dive into existing GoRules and how to author new ones
+          </span>
+        </div>
+        <button class="btn-xs primary" onclick="openCreateRuleModal()">+ New Rule from Template</button>
+      </div>
+
+      <div style="padding: 1.25rem 1.5rem; line-height: 1.55; font-size: 0.88rem;">
+        <!-- Two Production Rules Grid -->
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem;">
+          
+          <!-- Rule 1: compute-pricing.json -->
+          <div style="border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.15rem; background:#fafbfc;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+              <span class="badge badge-gorule" style="font-size:0.75rem;">compute-pricing.json</span>
+              <button class="btn-xs" onclick="viewRuleModal('compute-pricing.json')">View JSON Graph</button>
+            </div>
+            <h4 style="margin:0 0 0.35rem 0; font-size:0.95rem;">Rule 1: Instance Type &amp; Loyalty Discounts</h4>
+            <p style="color:var(--muted); margin:0 0 0.75rem 0; font-size:0.83rem;">
+              Maps machine shapes (e.g. <code>standard-4-16</code>) and tenant tiers (e.g. <code>gold</code>) to base $/hour rates and automatic percentage discounts.
+            </p>
+            <div style="font-size:0.82rem; margin-bottom:0.6rem;">
+              <strong>DAG:</strong> <code>Request</code> &rarr; <code>Instance Type Rate (table)</code> &rarr; <code>Calculate Cost (expr)</code> &rarr; <code>Response</code>
+            </div>
+            <div style="font-size:0.82rem; background:white; border:1px solid var(--border); border-radius:6px; padding:0.6rem;">
+              <div style="font-weight:600; margin-bottom:0.25rem; font-size:0.76rem; text-transform:uppercase; color:var(--muted);">Truth Table Matrix</div>
+              <div>• <code>standard-2-8</code> + <code>gold</code> &rarr; $0.10/hr (20% off = <strong>$0.08/hr</strong>)</div>
+              <div>• <code>standard-4-16</code> + <code>gold</code> &rarr; $0.20/hr (20% off = <strong>$0.16/hr</strong>)</div>
+              <div>• <code>standard-8-32</code> + <code>gold</code> &rarr; $0.40/hr (20% off = <strong>$0.32/hr</strong>)</div>
+              <div>• Standard tenants &rarr; 0% discount</div>
+            </div>
+            <div style="font-size:0.8rem; margin-top:0.6rem; color:var(--muted);">
+              <strong>Formula:</strong> <code>(uptime_sec / 3600) * price_per_hour * (1 - discount_pct / 100)</code>
+            </div>
+          </div>
+
+          <!-- Rule 2: committed-use-pricing.json -->
+          <div style="border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.15rem; background:#fafbfc;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+              <span class="badge badge-gorule" style="font-size:0.75rem;">committed-use-pricing.json</span>
+              <button class="btn-xs" onclick="viewRuleModal('committed-use-pricing.json')">View JSON Graph</button>
+            </div>
+            <h4 style="margin:0 0 0.35rem 0; font-size:0.95rem;">Rule 2: Committed-Use &amp; Sustained-Use</h4>
+            <p style="color:var(--muted); margin:0 0 0.75rem 0; font-size:0.83rem;">
+              Enterprise contract commitments with dynamic fallback to utilization-based sustained discounts and on-demand pricing.
+            </p>
+            <div style="font-size:0.82rem; margin-bottom:0.6rem;">
+              <strong>DAG:</strong> <code>Request</code> &rarr; <code>CUD Agreement</code> &rarr; <code>Sustained Discount</code> &rarr; <code>Calculate Cost</code> &rarr; <code>Response</code>
+            </div>
+            <div style="font-size:0.82rem; background:white; border:1px solid var(--border); border-radius:6px; padding:0.6rem;">
+              <div style="font-weight:600; margin-bottom:0.25rem; font-size:0.76rem; text-transform:uppercase; color:var(--muted);">Evaluation Ladder</div>
+              <div>1. <strong>CUD:</strong> If <code>running_vms &le; committed_qty</code> &rarr; <strong>40-50% off</strong></div>
+              <div>2. <strong>Sustained:</strong> If util &ge; 75% &rarr; <strong>20% off</strong>, &ge; 50% &rarr; <strong>10% off</strong></div>
+              <div>3. <strong>On-Demand:</strong> Low utilization &rarr; <strong>0% off</strong></div>
+            </div>
+            <div style="font-size:0.8rem; margin-top:0.6rem; color:var(--muted);">
+              <strong>Audit:</strong> Stamps cost entries with <code>CUD 1-year</code>, <code>Sustained-use</code>, or <code>On-demand</code>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Authoring Reference & Contract -->
+        <div style="background:#f1f5f9; border-radius:8px; padding:1rem 1.25rem; font-size:0.84rem;">
+          <h4 style="margin:0 0 0.5rem 0; font-size:0.9rem; color:var(--text);">How to Author &amp; Bind a New GoRule</h4>
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:1.25rem;">
+            <div>
+              <div style="font-weight:600; margin-bottom:0.25rem; color:var(--muted); font-size:0.76rem; text-transform:uppercase;">Input Parameters (Passed by Rating Engine)</div>
+              <ul style="margin:0; padding-left:1.2rem; color:var(--text);">
+                <li><code>instance_type</code>: Sizing spec (e.g. <code>"standard-2-8"</code>)</li>
+                <li><code>catalog_item</code>: Catalog offering / SKU name</li>
+                <li><code>tenant_tier</code>: Tenant tier label (e.g. <code>"gold"</code>)</li>
+                <li><code>tenant_id</code>: Tenant ID / namespace</li>
+                <li><code>value</code>: Metered quantity (e.g. seconds, tokens)</li>
+              </ul>
+            </div>
+            <div>
+              <div style="font-weight:600; margin-bottom:0.25rem; color:var(--muted); font-size:0.76rem; text-transform:uppercase;">Required Output Contract (Zen Output Node)</div>
+              <ul style="margin:0; padding-left:1.2rem; color:var(--text);">
+                <li><code>cost_amount</code> (number): Total dollar cost</li>
+                <li><code>effective_rate</code> (number): Hourly or unit rate</li>
+                <li><code>currency</code> (string): e.g. <code>'USD'</code></li>
+                <li><code>description</code> (string): Description for invoices / reports</li>
+              </ul>
+            </div>
+          </div>
+          <div style="margin-top:0.75rem; padding-top:0.75rem; border-top:1px solid #cbd5e1; display:flex; justify-content:space-between; align-items:center;">
+            <span>Documentation: Detailed specification in <code>docs/gorules-authoring-guide.md</code>.</span>
+            <button class="btn-xs" onclick="openCreateRuleModal()">Open Rule Editor</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
   </div>
 </div>
 
