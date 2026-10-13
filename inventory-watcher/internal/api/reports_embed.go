@@ -44,6 +44,10 @@ const reportsHTML = `<!DOCTYPE html>
     background: white; }
   .period-bar .spacer { flex: 1; }
   .period-bar .last-updated { font-size: 0.78rem; color: var(--muted); }
+  .btn-export { padding: 0.25rem 0.65rem; border-radius: 4px; border: 1px solid var(--border);
+                background: white; color: var(--text); cursor: pointer; font-size: 0.82rem;
+                display: inline-flex; align-items: center; gap: 0.35rem; font-weight: 500; }
+  .btn-export:hover { background: #f8fafc; border-color: #cbd5e1; }
 
   /* KPI tiles */
   .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem;
@@ -149,6 +153,7 @@ const reportsHTML = `<!DOCTYPE html>
 <div class="period-bar">
   <label>Period <input type="month" id="period"></label>
   <label>Organization <select id="orgFilter"><option value="">All organizations</option></select></label>
+  <button class="btn-export" id="exportBtn" onclick="exportCSV()" title="Export current view to CSV">⬇ Export CSV</button>
   <div class="spacer"></div>
   <div class="last-updated" id="statusLine">Loading...</div>
 </div>
@@ -166,6 +171,7 @@ const reportsHTML = `<!DOCTYPE html>
   <div class="tabs">
     <div class="tab active" data-tab="orgs" onclick="switchTab(this)">By Organization</div>
     <div class="tab" data-tab="resources" onclick="switchTab(this)">By Resource Type</div>
+    <div class="tab" data-tab="breakdown" onclick="switchTab(this)">Line-Item Breakdown</div>
     <div class="tab" data-tab="quotas" onclick="switchTab(this)">Quota Status</div>
   </div>
 
@@ -210,6 +216,31 @@ const reportsHTML = `<!DOCTYPE html>
             <th class="num">Share</th>
           </tr></thead>
           <tbody id="meterBody"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="tabBreakdown" style="display:none">
+    <div class="card">
+      <div class="card-header">
+        Line-Item Cost Breakdown
+        <span class="subtitle" id="breakdownSubtitle">Individual rated resource entries</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th>Date</th>
+            <th>Organization</th>
+            <th>Project</th>
+            <th>Resource Type</th>
+            <th>Resource ID</th>
+            <th>Meter</th>
+            <th class="num">Value</th>
+            <th>Layer</th>
+            <th class="num">Cost</th>
+          </tr></thead>
+          <tbody id="breakdownBody"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -349,7 +380,7 @@ function switchTab(el) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   el.classList.add('active');
   currentTab = el.dataset.tab;
-  ['Orgs','Resources','Quotas'].forEach(t => $('tab'+t).style.display = 'none');
+  ['Orgs','Resources','Breakdown','Quotas'].forEach(t => $('tab'+t).style.display = 'none');
   $('tab' + currentTab.charAt(0).toUpperCase() + currentTab.slice(1)).style.display = '';
   loadAll();
 }
@@ -530,11 +561,124 @@ async function loadQuotas() {
       }).join('');
 }
 
+async function loadBreakdown() {
+  const period = $('period').value;
+  const org = $('orgFilter').value;
+  let url = '/api/v1/reports/breakdown?limit=500';
+  if (period) {
+    const [y, m] = period.split('-').map(Number);
+    const from = new Date(Date.UTC(y, m - 1, 1)).toISOString();
+    const to = new Date(Date.UTC(y, m, 1)).toISOString();
+    url += '&from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to);
+  }
+  if (org) url += '&tenant_id=' + encodeURIComponent(org);
+
+  const d = await api(url);
+  const rows = d.data || [];
+  $('breakdownSubtitle').textContent = rows.length === 0
+    ? 'No line-item entries for this period'
+    : rows.length + (rows.length === 500 ? '+ entries (showing first 500)' : ' entries');
+
+  $('breakdownBody').innerHTML = rows.length === 0
+    ? '<tr><td colspan="9" class="empty">No cost breakdown records for this period</td></tr>'
+    : rows.map(r => {
+        const costType = (r.cost_type || '').toLowerCase();
+        let layerBadge = esc(r.cost_type || '—');
+        if (costType === 'infrastructure') {
+          layerBadge = '<span style="color:var(--blue);font-weight:600">Infra</span>';
+        } else if (costType === 'supplementary') {
+          layerBadge = '<span style="color:var(--purple);font-weight:600">Usage</span>';
+        }
+        return '<tr>' +
+          '<td>' + esc(r.date || '—') + '</td>' +
+          '<td><strong>' + esc(r.tenant_id || '—') + '</strong></td>' +
+          '<td><span style="font-size:0.82rem;color:var(--muted)">' + esc(r.project_id || '—') + '</span></td>' +
+          '<td>' + esc(RESOURCE_LABELS[r.resource_type] || r.resource_type || '—') + '</td>' +
+          '<td><code style="font-size:0.78rem" title="' + esc(r.resource_id) + '">' + esc(r.resource_id || '—') + '</code></td>' +
+          '<td>' + esc(METER_LABELS[r.meter_name] || r.meter_name || '—') + '</td>' +
+          '<td class="num">' + (r.metered_value != null ? Number(r.metered_value).toLocaleString(undefined, {maximumFractionDigits: 2}) : '—') + '</td>' +
+          '<td>' + layerBadge + '</td>' +
+          '<td class="num"><strong>' + fmt(r.cost_amount) + '</strong></td>' +
+        '</tr>';
+      }).join('');
+}
+
+function downloadBlob(blob, filename) {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(link.href);
+}
+
+async function exportCSV() {
+  const btn = $('exportBtn');
+  const origText = btn.textContent;
+  btn.textContent = 'Exporting…';
+  btn.disabled = true;
+  try {
+    const period = $('period').value;
+    const org = $('orgFilter').value;
+    let url = '';
+    let filename = 'costs-' + currentTab + '-' + (period || 'all') + '.csv';
+
+    if (currentTab === 'orgs') {
+      url = '/api/v1/reports/costs?group_by=tenant&format=csv';
+      if (period) url += '&period=' + encodeURIComponent(period);
+      if (org) url += '&tenant_id=' + encodeURIComponent(org);
+    } else if (currentTab === 'resources') {
+      url = '/api/v1/reports/costs?group_by=resource_type&format=csv';
+      if (period) url += '&period=' + encodeURIComponent(period);
+    } else if (currentTab === 'breakdown') {
+      url = '/api/v1/reports/breakdown?format=csv&limit=1000';
+      if (period) {
+        const [y, m] = period.split('-').map(Number);
+        const from = new Date(Date.UTC(y, m - 1, 1)).toISOString();
+        const to = new Date(Date.UTC(y, m, 1)).toISOString();
+        url += '&from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to);
+      }
+      if (org) url += '&tenant_id=' + encodeURIComponent(org);
+      filename = 'breakdown-' + (period || 'all') + '.csv';
+    } else if (currentTab === 'quotas') {
+      const rows = Array.from(document.querySelectorAll('#quotaBody tr'));
+      let csv = 'Organization,Meter,Consumed,Limit,Status\n';
+      rows.forEach(tr => {
+        const cols = Array.from(tr.querySelectorAll('td')).map(td => '"' + td.textContent.replace(/"/g, '""').trim() + '"');
+        if (cols.length >= 6) {
+          csv += [cols[0], cols[1], cols[2], cols[3], cols[5]].join(',') + '\n';
+        }
+      });
+      downloadBlob(new Blob([csv], { type: 'text/csv' }), 'quotas-' + (period || 'all') + '.csv');
+      return;
+    }
+
+    const headers = {};
+    const tok = getToken();
+    if (tok) headers['Authorization'] = 'Bearer ' + tok;
+    const res = await fetch(window.location.origin + url, { headers });
+    if (res.status === 401) {
+      showTokenModal();
+      return;
+    }
+    if (!res.ok) throw new Error('Export failed: ' + res.statusText);
+    const blob = await res.blob();
+    downloadBlob(blob, filename);
+  } catch (err) {
+    alert('Failed to export CSV: ' + err.message);
+  } finally {
+    btn.textContent = origText;
+    btn.disabled = false;
+  }
+}
+
 async function loadAll() {
   $('errorBanner').style.display = 'none';
   try {
     if (currentTab === 'orgs') await loadCostByOrg();
     else if (currentTab === 'resources') { await loadCostByOrg(); await loadCostByResource(); }
+    else if (currentTab === 'breakdown') { await loadCostByOrg(); await loadBreakdown(); }
     else if (currentTab === 'quotas') { await loadCostByOrg(); await loadQuotas(); }
     $('statusLine').textContent = 'Updated ' + new Date().toLocaleTimeString();
     $('lastUpdated').textContent = new Date().toLocaleTimeString();
