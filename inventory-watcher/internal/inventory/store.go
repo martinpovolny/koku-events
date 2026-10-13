@@ -2349,7 +2349,18 @@ func (s *Store) PricingRulesVersion(ctx context.Context) (int64, error) {
 	return v, err
 }
 
+// ErrRuleInUse is returned when attempting to delete a pricing rule that is referenced by active rate cards.
+var ErrRuleInUse = errors.New("rule is referenced by active rates")
+
 func (s *Store) DeletePricingRule(ctx context.Context, name string) (bool, error) {
+	var count int
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM rates WHERE rule_name = $1`, name).Scan(&count); err != nil {
+		return false, err
+	}
+	if count > 0 {
+		return false, fmt.Errorf("%w: %q is referenced by %d active rate(s)", ErrRuleInUse, name, count)
+	}
+
 	tag, err := s.db.Exec(ctx, `DELETE FROM pricing_rules WHERE name = $1`, name)
 	if err != nil {
 		return false, err

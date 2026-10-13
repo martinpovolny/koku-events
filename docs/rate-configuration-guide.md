@@ -44,7 +44,7 @@ The rating engine in `inventory-watcher/internal/rating/rating.go` converts unra
 ```
 
 1. **Rate Card Precedence:** The rating sweep finds the most specific rate card matching the metering entry (Tenant + Catalog Item > Catalog Item > Tenant + Machine Type > Machine Type > Tenant Default > Global Default). If no rate card matches, the entry is skipped with a logged warning.
-2. **Model 1: Rate-Bound GoRule (`rate.rule_name != ""`):** If the matched rate card specifies a GoRule decision model (e.g. `compute-pricing.json`), the Zen decision engine executes that model using the entry's dimensions (`instance_type`, `catalog_item`, `tenant_tier`, `tenant_id`, `resource_type`, `meter_name`, `value`). The resulting cost entry is tagged with `RateID: rate.ID`.
+2. **Model 1: Rate-Bound GoRule (`rate.rule_name != ""`):** If the matched rate card specifies a GoRule decision model (e.g. `compute-pricing.json`), the Zen decision engine executes that model using the entry's dimensions (`instance_type`, `catalog_item`, `tenant_tier`, `tenant_id`, `resource_type`, `meter_name`, `value`). The resulting cost entry is tagged with `RateID: rate.ID`. If GoRule evaluation fails, the rating sweep falls back to evaluating the card's `price_per_unit` (which defaults to `0` for GoRule-only rate cards, resulting in a zero-cost entry and a warning log).
 3. **Model 2: Tiered Rating (`len(rate.tiers) > 0`):** Computes cost using graduated price brackets either per-event or cumulatively across a rolling window (e.g. monthly).
 4. **Model 3: Flat / Simple Rate:** Direct linear calculation (`value * price_per_unit`).
 

@@ -754,7 +754,7 @@ func TestSweep_RateBoundGoRule(t *testing.T) {
 
 	// Verify cost entry was created with RateID and correct cost ($0.10 for 1h standard-2-8)
 	var count int
-	var costAmount float64
+	var costAmount decimal.Decimal
 	var actualRateID int64
 	err = testStore.Pool().QueryRow(ctx,
 		"SELECT count(*), COALESCE(sum(cost_amount), 0), COALESCE(max(rate_id), 0) FROM cost_entries WHERE resource_id = $1",
@@ -768,8 +768,8 @@ func TestSweep_RateBoundGoRule(t *testing.T) {
 	if actualRateID != insertedRateID {
 		t.Errorf("expected cost entry rate_id %d, got %d", insertedRateID, actualRateID)
 	}
-	if costAmount != 0.10 {
-		t.Errorf("expected cost amount 0.10, got %f", costAmount)
+	if !costAmount.Equal(decimal.NewFromFloat(0.10)) {
+		t.Errorf("expected cost amount 0.10, got %s", costAmount)
 	}
 }
 

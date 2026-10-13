@@ -44,7 +44,7 @@ The cost management system embeds **Zen Go** (`github.com/gorules/zen-go`), an u
 ```
 
 ### Key Properties
-- **Zero-Downtime Hot Reloading**: Rule definitions are stored in PostgreSQL (`pricing_rules` table). When a rule is added or updated via `POST /api/v1/rules` or the web UI, the engine automatically increments the revision version and reloads the Zen cache on the next rating sweep without restarting the process.
+- **Zero-Downtime Hot Reloading**: Rule definitions are stored in PostgreSQL (`pricing_rules` table). When a rule is added or updated via `POST /api/v1/rules` or the web UI, the engine automatically increments the revision version and reloads the Zen cache on the next rating sweep without restarting the process. Note that the API validates valid JSON syntax upon save, but semantic JDM graph validity is checked by the Zen engine at evaluation time; an invalid graph will log an evaluation failure and fall back during the rating sweep.
 - **Rate-Card Binding**: Rules are not global overrides; they are bound to specific rate cards via `rates.rule_name`. A rate card matches catalog items, machine types, tenants, and meters, then delegates calculation to its bound rule.
 - **Deterministic DAG**: Each rule is represented as a directed acyclic graph composed of nodes (inputs, decision tables, expressions, outputs) connected by edges.
 
@@ -347,7 +347,7 @@ Create a `.json` file following the Zen JDM specification:
 2. Click the **GoRules Decision Models** tab.
 3. Click **+ Add Decision Model**.
 4. Enter the model name (e.g. `gpu-cluster-pricing.json`) and paste your JSON definition.
-5. Click **Save Decision Model**. The engine immediately compiles and caches the rule.
+5. Click **Save Decision Model**. The definition is persisted to PostgreSQL and reloaded into the Zen engine on the next rating sweep.
 
 #### Option B: REST API (`/api/v1/rules`)
 ```bash

@@ -2784,8 +2784,10 @@ func TestCatalogAndRates_Database(t *testing.T) {
 }
 
 func TestRulesAPI_CRUD(t *testing.T) {
+	ruleName := fmt.Sprintf("test-rule-%d.json", time.Now().UnixNano())
+
 	// 1. Create a rule via POST /api/v1/rules
-	rulePayload := `{"name":"test-rule.json","rule_json":{"nodes":[{"id":"n1","type":"inputNode"}],"edges":[]}}`
+	rulePayload := fmt.Sprintf(`{"name":%q,"rule_json":{"nodes":[{"id":"n1","type":"inputNode"}],"edges":[]}}`, ruleName)
 	postResp, err := http.Post(testServer.URL+"/api/v1/rules", "application/json", strings.NewReader(rulePayload))
 	if err != nil {
 		t.Fatalf("POST /api/v1/rules: %v", err)
@@ -2795,14 +2797,14 @@ func TestRulesAPI_CRUD(t *testing.T) {
 		t.Fatalf("POST /api/v1/rules status = %d, want 201", postResp.StatusCode)
 	}
 
-	// 2. Fetch the rule via GET /api/v1/rules/test-rule.json
-	getResp, err := http.Get(testServer.URL + "/api/v1/rules/test-rule.json")
+	// 2. Fetch the rule via GET /api/v1/rules/{name}
+	getResp, err := http.Get(testServer.URL + "/api/v1/rules/" + ruleName)
 	if err != nil {
-		t.Fatalf("GET /api/v1/rules/test-rule.json: %v", err)
+		t.Fatalf("GET /api/v1/rules/%s: %v", ruleName, err)
 	}
 	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /api/v1/rules/test-rule.json status = %d, want 200", getResp.StatusCode)
+		t.Fatalf("GET /api/v1/rules/%s status = %d, want 200", ruleName, getResp.StatusCode)
 	}
 	var fetchedRule struct {
 		Name    string `json:"name"`
@@ -2811,7 +2813,7 @@ func TestRulesAPI_CRUD(t *testing.T) {
 	if err := json.NewDecoder(getResp.Body).Decode(&fetchedRule); err != nil {
 		t.Fatalf("decode rule: %v", err)
 	}
-	if fetchedRule.Name != "test-rule.json" || fetchedRule.Version != 1 {
+	if fetchedRule.Name != ruleName || fetchedRule.Version != 1 {
 		t.Errorf("unexpected rule: %+v", fetchedRule)
 	}
 
@@ -2826,7 +2828,7 @@ func TestRulesAPI_CRUD(t *testing.T) {
 	}
 
 	// 4. Update the rule via POST /api/v1/rules (version should increment)
-	updatePayload := `{"name":"test-rule.json","rule_json":{"nodes":[{"id":"n1_updated"}],"edges":[]}}`
+	updatePayload := fmt.Sprintf(`{"name":%q,"rule_json":{"nodes":[{"id":"n1_updated"}],"edges":[]}}`, ruleName)
 	updResp, err := http.Post(testServer.URL+"/api/v1/rules", "application/json", strings.NewReader(updatePayload))
 	if err != nil {
 		t.Fatalf("update rule: %v", err)
@@ -2840,8 +2842,8 @@ func TestRulesAPI_CRUD(t *testing.T) {
 		t.Errorf("expected version 2 after update, got %d", updatedRule.Version)
 	}
 
-	// 5. Delete the rule via DELETE /api/v1/rules/test-rule.json
-	delReq, _ := http.NewRequest(http.MethodDelete, testServer.URL+"/api/v1/rules/test-rule.json", nil)
+	// 5. Delete the rule via DELETE /api/v1/rules/{name}
+	delReq, _ := http.NewRequest(http.MethodDelete, testServer.URL+"/api/v1/rules/"+ruleName, nil)
 	delResp, err := http.DefaultClient.Do(delReq)
 	if err != nil {
 		t.Fatalf("DELETE rule: %v", err)
@@ -2852,7 +2854,7 @@ func TestRulesAPI_CRUD(t *testing.T) {
 	}
 
 	// Deleting again should return 404
-	delReqAgain, err := http.NewRequest(http.MethodDelete, testServer.URL+"/api/v1/rules/test-rule.json", nil)
+	delReqAgain, err := http.NewRequest(http.MethodDelete, testServer.URL+"/api/v1/rules/"+ruleName, nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -2867,14 +2869,22 @@ func TestRulesAPI_CRUD(t *testing.T) {
 }
 
 func TestCreateRate_WithRuleName(t *testing.T) {
-	payload := `{
+	ruleName := fmt.Sprintf("pricing-rule-%d.json", time.Now().UnixNano())
+	rulePayload := fmt.Sprintf(`{"name":%q,"rule_json":{"nodes":[],"edges":[]}}`, ruleName)
+	pResp, err := http.Post(testServer.URL+"/api/v1/rules", "application/json", strings.NewReader(rulePayload))
+	if err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+	pResp.Body.Close()
+
+	payload := fmt.Sprintf(`{
 		"resource_type": "compute_instance",
 		"catalog_item": "test-cat-rule",
 		"meter_name": "vm_uptime_seconds",
-		"rule_name": "compute-pricing.json",
+		"rule_name": %q,
 		"price_per_unit": "0",
 		"description": "GoRule dynamic rate card"
-	}`
+	}`, ruleName)
 	resp, err := http.Post(testServer.URL+"/api/v1/rates", "application/json", strings.NewReader(payload))
 	if err != nil {
 		t.Fatalf("POST /api/v1/rates: %v", err)
@@ -2888,7 +2898,7 @@ func TestCreateRate_WithRuleName(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&rec); err != nil {
 		t.Fatalf("decode rate record: %v", err)
 	}
-	if rec.RuleName != "compute-pricing.json" {
-		t.Errorf("expected rule_name 'compute-pricing.json', got %q", rec.RuleName)
+	if rec.RuleName != ruleName {
+		t.Errorf("expected rule_name %q, got %q", ruleName, rec.RuleName)
 	}
 }

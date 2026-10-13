@@ -736,18 +736,6 @@ function findMatchingCatalogRate(resourceType, catalogItem) {
     (!r.instance_type || r.instance_type === ''));
 }
 
-function checkGoRuleCoverage(sku) {
-  // Check if sku is referenced in compute-pricing.json or other active rules
-  for (const rule of state.rules) {
-    if (rule.rule_json) {
-      const str = typeof rule.rule_json === 'string' ? rule.rule_json : JSON.stringify(rule.rule_json);
-      if (str.includes(sku)) {
-        return rule.name;
-      }
-    }
-  }
-  return null;
-}
 
 function escapeHTML(str) {
   if (str === null || str === undefined) return '';
@@ -806,7 +794,6 @@ function renderAll() {
 
   for (const it of state.instanceTypes) {
     const rate = findMatchingRate('compute_instance', it.name);
-    const coveredByRule = !rate ? checkGoRuleCoverage(it.name) : null;
     unified.push({
       category: 'instance_type',
       categoryLabel: 'Machine Type',
@@ -817,7 +804,7 @@ function renderAll() {
       specs: (it.cores || 0) + ' vCPU, ' + (it.memory_gib || 0) + ' GiB RAM',
       status: it.state || 'active',
       rate: rate,
-      fallbackRule: coveredByRule
+      fallbackRule: null
     });
   }
 
@@ -829,7 +816,6 @@ function renderAll() {
     else if (ci.item_type && ci.item_type.includes('model')) { resType = 'model'; catLabel = 'Model Offering'; }
 
     const rate = findMatchingCatalogRate(resType, ci.name) || findMatchingCatalogRate(resType, ci.catalog_item_id);
-    const coveredByRule = !rate ? checkGoRuleCoverage(ci.name) : null;
     unified.push({
       category: resType,
       categoryLabel: catLabel,
@@ -840,7 +826,7 @@ function renderAll() {
       specs: ci.description || ('Template: ' + (ci.template || '—')),
       status: ci.published ? 'published' : 'draft',
       rate: rate,
-      fallbackRule: coveredByRule
+      fallbackRule: null
     });
   }
 

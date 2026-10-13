@@ -453,9 +453,15 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/PricingRule"
+                type: object
+                properties:
+                  rules:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PricingRule"
+                  count:
+                    type: integer
+                    description: Number of rules returned
         "500":
           description: Database query failed
           content:
@@ -477,7 +483,7 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateOrUpdateRuleRequest"
       responses:
-        "200":
+        "201":
           description: Rule created or updated successfully
           content:
             application/json:

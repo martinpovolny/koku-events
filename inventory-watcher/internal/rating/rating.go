@@ -234,6 +234,14 @@ func (r *Rater) evalRuleRate(ctx context.Context, me inventory.MeteringEntry, ra
 		"resource", me.ResourceID, "rule", rate.RuleName, "rate_id", rate.ID,
 		"cost", output.CostAmount, "effective_rate", output.EffectiveRate)
 
+	curr := output.Currency
+	if curr == "" {
+		curr = rate.Currency
+	}
+	if curr == "" {
+		curr = "USD"
+	}
+
 	return inventory.CostEntry{
 		MeteringEntryID: me.ID,
 		RateID:          rate.ID,
@@ -245,7 +253,7 @@ func (r *Rater) evalRuleRate(ctx context.Context, me inventory.MeteringEntry, ra
 		MeterName:       me.MeterName,
 		MeteredValue:    me.Value,
 		CostAmount:      decimal.NewFromFloat(output.CostAmount),
-		Currency:        output.Currency,
+		Currency:        curr,
 		PeriodStart:     me.PeriodStart,
 		PeriodEnd:       me.PeriodEnd,
 	}, true

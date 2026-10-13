@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 
 	"github.com/osac-project/cost-event-consumer/internal/billing"
@@ -1022,17 +1023,21 @@ func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
 		ruleName = strings.TrimSpace(*req.RuleName)
 	}
 
+	if ruleName != "" {
+		if _, err := h.store.GetPricingRule(r.Context(), ruleName); err != nil {
+			writeErrorJSON(w, "referenced rule does not exist: "+ruleName, http.StatusBadRequest)
+			return
+		}
+	}
+
 	price := decimal.Zero
 	if req.PricePerUnit != "" {
 		p, err := decimal.NewFromString(req.PricePerUnit)
 		if err != nil {
-			if ruleName == "" {
-				writeErrorJSON(w, "invalid price_per_unit decimal value", http.StatusBadRequest)
-				return
-			}
-		} else {
-			price = p
+			writeErrorJSON(w, "invalid price_per_unit decimal value", http.StatusBadRequest)
+			return
 		}
+		price = p
 	} else if ruleName == "" {
 		writeErrorJSON(w, "invalid price_per_unit decimal value", http.StatusBadRequest)
 		return
@@ -2114,7 +2119,12 @@ func (h *APIHandler) GetRule(w http.ResponseWriter, r *http.Request, name string
 	}
 	rule, err := h.store.GetPricingRule(r.Context(), name)
 	if err != nil {
-		writeErrorJSON(w, "rule not found", http.StatusNotFound)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeErrorJSON(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		h.logger.Error("get rule failed", "name", name, "error", err)
+		writeErrorJSON(w, "failed to get rule", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, rule)
@@ -2170,6 +2180,10 @@ func (h *APIHandler) DeleteRule(w http.ResponseWriter, r *http.Request, name str
 	}
 	found, err := h.store.DeletePricingRule(r.Context(), name)
 	if err != nil {
+		if errors.Is(err, inventory.ErrRuleInUse) {
+			writeErrorJSON(w, err.Error(), http.StatusConflict)
+			return
+		}
 		h.logger.Error("delete rule failed", "name", name, "error", err)
 		writeErrorJSON(w, "failed to delete rule", http.StatusInternalServerError)
 		return
