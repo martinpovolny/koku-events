@@ -54,6 +54,8 @@ tags:
     description: Catalog items and machine instance types for rate assignment
   - name: Rates
     description: Rate card listing and management with JSON and CSV export
+  - name: Rules
+    description: GoRules decision models management (CRUD)
   - name: Quotas
     description: Quota and budget management with real-time consumption tracking
   - name: Wallets
@@ -431,6 +433,133 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Database update failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Rules ───────────────────────────────────────────────────────────────
+  /api/v1/rules:
+    get:
+      operationId: listRules
+      tags: [Rules]
+      summary: List all GoRules pricing decision models
+      description: >-
+        Returns all GoRules decision models stored in the database,
+        ordered by name.
+      responses:
+        "200":
+          description: List of pricing rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rules:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PricingRule"
+                  count:
+                    type: integer
+                    description: Number of rules returned
+        "500":
+          description: Database query failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    post:
+      operationId: createOrUpdateRule
+      tags: [Rules]
+      summary: Create or update a GoRules pricing decision model
+      description: >-
+        Uploads or updates a Zen GoRules decision model JSON definition.
+        Automatically increments the model version and invalidates engine cache.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrUpdateRuleRequest"
+      responses:
+        "201":
+          description: Rule created or updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricingRule"
+        "400":
+          description: Invalid request payload or missing name/rule_json
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Database write failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/rules/{name}:
+    get:
+      operationId: getRule
+      tags: [Rules]
+      summary: Get a GoRules decision model by name
+      description: >-
+        Retrieves a GoRules pricing decision model by filename/identifier.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Rule name (e.g. compute-pricing.json)
+      responses:
+        "200":
+          description: Decision model details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricingRule"
+        "404":
+          description: Rule not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Database query failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      operationId: deleteRule
+      tags: [Rules]
+      summary: Delete a GoRules pricing decision model
+      description: >-
+        Deletes a pricing decision model from the database and cache.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Rule name to delete
+      responses:
+        "204":
+          description: Rule deleted successfully
+        "404":
+          description: Rule not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Database delete failed
           content:
             application/json:
               schema:
@@ -2060,6 +2189,10 @@ components:
           type: string
           description: Human-readable description of the rate
           example: Input tokens for LLM inference
+        rule_name:
+          type: string
+          description: GoRules decision model name bound to this rate card (empty if flat or tiered)
+          example: compute-pricing.json
         effective_from:
           type: string
           format: date-time
@@ -2141,6 +2274,11 @@ components:
           default: ""
           description: Description of the rate card
           example: Standard 4 vCPU 16GB VM rate ($0.10/hour)
+        rule_name:
+          type: string
+          default: ""
+          description: Optional GoRules decision model filename/identifier (e.g. compute-pricing.json) to evaluate dynamically
+          example: compute-pricing.json
         effective_from:
           type: string
           format: date-time
@@ -2151,6 +2289,50 @@ components:
           format: date-time
           nullable: true
           description: Rate effective end timestamp (defaults to null / open-ended)
+
+    PricingRule:
+      type: object
+      description: GoRules pricing decision model stored in the database
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Rule record ID
+          example: 1
+        name:
+          type: string
+          description: Unique decision model name (e.g. compute-pricing.json)
+          example: compute-pricing.json
+        rule_json:
+          type: object
+          description: Decision model JSON definition (Zen GoRules graph)
+        version:
+          type: integer
+          format: int64
+          description: Monotonic revision number of the rule
+          example: 2
+        created_at:
+          type: string
+          format: date-time
+          description: Timestamp when rule was first created
+        updated_at:
+          type: string
+          format: date-time
+          description: Timestamp when rule was last modified
+
+    CreateOrUpdateRuleRequest:
+      type: object
+      required:
+        - name
+        - rule_json
+      properties:
+        name:
+          type: string
+          description: Decision model identifier (e.g. compute-pricing.json)
+          example: compute-pricing.json
+        rule_json:
+          type: object
+          description: Zen GoRules decision model JSON content
 
     # ── Quotas ────────────────────────────────────────────────────────────
     QuotaRecord:

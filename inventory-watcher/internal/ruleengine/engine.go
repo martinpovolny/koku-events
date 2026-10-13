@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	zen "github.com/gorules/zen-go"
@@ -80,6 +81,24 @@ func (e *Engine) HasRules() bool {
 	return len(e.cache) > 0
 }
 
+func (e *Engine) HasRule(name string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if _, ok := e.cache[name]; ok {
+		return true
+	}
+	if !strings.HasSuffix(name, ".json") {
+		if _, ok := e.cache[name+".json"]; ok {
+			return true
+		}
+	} else {
+		if _, ok := e.cache[strings.TrimSuffix(name, ".json")]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) RuleNames() []string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -125,6 +144,12 @@ func (e *Engine) EvaluateRate(ruleFile string, input PricingInput) (*PricingOutp
 	}
 
 	resp, err := e.engine.Evaluate(ruleFile, inputMap)
+	if err != nil && !strings.HasSuffix(ruleFile, ".json") {
+		resp, err = e.engine.Evaluate(ruleFile+".json", inputMap)
+	}
+	if err != nil && strings.HasSuffix(ruleFile, ".json") {
+		resp, err = e.engine.Evaluate(strings.TrimSuffix(ruleFile, ".json"), inputMap)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("rule evaluation failed: %w", err)
 	}

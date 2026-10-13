@@ -69,6 +69,7 @@ func TestMain(m *testing.M) {
 	h := api.NewAPIHandler(testStore, testMeter, nil, nil, testLogger)
 	mux := http.NewServeMux()
 	api.HandlerFromMux(h, mux)
+	h.RegisterLegacyRoutes(mux)
 	testServer = httptest.NewServer(mux)
 
 	if err := rating.SeedDefaultRates(ctx, testStore, testLogger); err != nil {
@@ -2779,5 +2780,125 @@ func TestCatalogAndRates_Database(t *testing.T) {
 	defer delRespAgain.Body.Close()
 	if delRespAgain.StatusCode != http.StatusNotFound {
 		t.Errorf("second DELETE status = %d, want 404", delRespAgain.StatusCode)
+	}
+}
+
+func TestRulesAPI_CRUD(t *testing.T) {
+	ruleName := fmt.Sprintf("test-rule-%d.json", time.Now().UnixNano())
+
+	// 1. Create a rule via POST /api/v1/rules
+	rulePayload := fmt.Sprintf(`{"name":%q,"rule_json":{"nodes":[{"id":"n1","type":"inputNode"}],"edges":[]}}`, ruleName)
+	postResp, err := http.Post(testServer.URL+"/api/v1/rules", "application/json", strings.NewReader(rulePayload))
+	if err != nil {
+		t.Fatalf("POST /api/v1/rules: %v", err)
+	}
+	defer postResp.Body.Close()
+	if postResp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /api/v1/rules status = %d, want 201", postResp.StatusCode)
+	}
+
+	// 2. Fetch the rule via GET /api/v1/rules/{name}
+	getResp, err := http.Get(testServer.URL + "/api/v1/rules/" + ruleName)
+	if err != nil {
+		t.Fatalf("GET /api/v1/rules/%s: %v", ruleName, err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/rules/%s status = %d, want 200", ruleName, getResp.StatusCode)
+	}
+	var fetchedRule struct {
+		Name    string `json:"name"`
+		Version int    `json:"version"`
+	}
+	if err := json.NewDecoder(getResp.Body).Decode(&fetchedRule); err != nil {
+		t.Fatalf("decode rule: %v", err)
+	}
+	if fetchedRule.Name != ruleName || fetchedRule.Version != 1 {
+		t.Errorf("unexpected rule: %+v", fetchedRule)
+	}
+
+	// 3. List rules via GET /api/v1/rules
+	listResp, err := http.Get(testServer.URL + "/api/v1/rules")
+	if err != nil {
+		t.Fatalf("GET /api/v1/rules: %v", err)
+	}
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/rules status = %d, want 200", listResp.StatusCode)
+	}
+
+	// 4. Update the rule via POST /api/v1/rules (version should increment)
+	updatePayload := fmt.Sprintf(`{"name":%q,"rule_json":{"nodes":[{"id":"n1_updated"}],"edges":[]}}`, ruleName)
+	updResp, err := http.Post(testServer.URL+"/api/v1/rules", "application/json", strings.NewReader(updatePayload))
+	if err != nil {
+		t.Fatalf("update rule: %v", err)
+	}
+	defer updResp.Body.Close()
+	var updatedRule struct {
+		Version int `json:"version"`
+	}
+	_ = json.NewDecoder(updResp.Body).Decode(&updatedRule)
+	if updatedRule.Version != 2 {
+		t.Errorf("expected version 2 after update, got %d", updatedRule.Version)
+	}
+
+	// 5. Delete the rule via DELETE /api/v1/rules/{name}
+	delReq, _ := http.NewRequest(http.MethodDelete, testServer.URL+"/api/v1/rules/"+ruleName, nil)
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("DELETE rule: %v", err)
+	}
+	defer delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE rule status = %d, want 204", delResp.StatusCode)
+	}
+
+	// Deleting again should return 404
+	delReqAgain, err := http.NewRequest(http.MethodDelete, testServer.URL+"/api/v1/rules/"+ruleName, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	delRespAgain, err := http.DefaultClient.Do(delReqAgain)
+	if err != nil {
+		t.Fatalf("second DELETE rule: %v", err)
+	}
+	defer delRespAgain.Body.Close()
+	if delRespAgain.StatusCode != http.StatusNotFound {
+		t.Errorf("second DELETE rule status = %d, want 404", delRespAgain.StatusCode)
+	}
+}
+
+func TestCreateRate_WithRuleName(t *testing.T) {
+	ruleName := fmt.Sprintf("pricing-rule-%d.json", time.Now().UnixNano())
+	rulePayload := fmt.Sprintf(`{"name":%q,"rule_json":{"nodes":[],"edges":[]}}`, ruleName)
+	pResp, err := http.Post(testServer.URL+"/api/v1/rules", "application/json", strings.NewReader(rulePayload))
+	if err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+	pResp.Body.Close()
+
+	payload := fmt.Sprintf(`{
+		"resource_type": "compute_instance",
+		"catalog_item": "test-cat-rule",
+		"meter_name": "vm_uptime_seconds",
+		"rule_name": %q,
+		"price_per_unit": "0",
+		"description": "GoRule dynamic rate card"
+	}`, ruleName)
+	resp, err := http.Post(testServer.URL+"/api/v1/rates", "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST /api/v1/rates: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", resp.StatusCode)
+	}
+
+	var rec inventory.RateRecord
+	if err := json.NewDecoder(resp.Body).Decode(&rec); err != nil {
+		t.Fatalf("decode rate record: %v", err)
+	}
+	if rec.RuleName != ruleName {
+		t.Errorf("expected rule_name %q, got %q", ruleName, rec.RuleName)
 	}
 }

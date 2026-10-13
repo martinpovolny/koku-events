@@ -100,13 +100,6 @@ func (r *Rater) sweep(ctx context.Context) {
 		var ratedIDs []int64
 
 		for _, me := range entries {
-			if ce, ok := r.tryRuleEngine(ctx, me); ok {
-				costEntries = append(costEntries, ce)
-				ratedIDs = append(ratedIDs, me.ID)
-				metrics.CostEntriesCreated.WithLabelValues(me.ResourceType, "RuleEngine").Inc()
-				continue
-			}
-
 			rate := matchRate(rateIndex, me.TenantID, me.CatalogItem, me.InstanceType, me.ResourceType, me.MeterName)
 			if rate == nil {
 				totalSkipped++
@@ -118,6 +111,15 @@ func (r *Rater) sweep(ctx context.Context) {
 				}
 				metrics.MeteringEntriesSkippedNoRate.WithLabelValues(me.ResourceType, me.MeterName).Inc()
 				continue
+			}
+
+			if rate.RuleName != "" {
+				if ce, ok := r.evalRuleRate(ctx, me, *rate); ok {
+					costEntries = append(costEntries, ce)
+					ratedIDs = append(ratedIDs, me.ID)
+					metrics.CostEntriesCreated.WithLabelValues(me.ResourceType, "RuleEngine").Inc()
+					continue
+				}
 			}
 
 			var cost decimal.Decimal
@@ -193,25 +195,27 @@ func (r *Rater) sweep(ctx context.Context) {
 	r.DeductWallets(ctx)
 }
 
-// DeductWallets applies unapplied cost entries to tenant wallets.
-func (r *Rater) tryRuleEngine(ctx context.Context, me inventory.MeteringEntry) (inventory.CostEntry, bool) {
-	if r.rules == nil {
+// evalRuleRate evaluates a specific GoRules decision model bound to a rate card.
+func (r *Rater) evalRuleRate(ctx context.Context, me inventory.MeteringEntry, rate inventory.RateRecord) (inventory.CostEntry, bool) {
+	if r.rules == nil || rate.RuleName == "" {
 		return inventory.CostEntry{}, false
 	}
 
-	if me.ResourceType != "compute_instance" || me.MeterName != "vm_uptime_seconds" {
-		return inventory.CostEntry{}, false
-	}
-
-	instanceType := ""
+	instanceType := me.InstanceType
 	tenantTier := ""
-	inst, err := r.store.GetComputeInstance(ctx, me.ResourceID)
-	if err == nil && inst != nil {
-		instanceType = inst.InstanceType
+	if me.ResourceType == "compute_instance" {
+		inst, err := r.store.GetComputeInstance(ctx, me.ResourceID)
+		if err == nil && inst != nil {
+			if instanceType == "" {
+				instanceType = inst.InstanceType
+			}
+			tenantTier = r.store.TenantTier(ctx, me.TenantID)
+		}
+	} else if me.TenantID != "" {
 		tenantTier = r.store.TenantTier(ctx, me.TenantID)
 	}
 
-	output, err := r.rules.EvaluateRate("compute-pricing.json", ruleengine.PricingInput{
+	output, err := r.rules.EvaluateRate(rate.RuleName, ruleengine.PricingInput{
 		InstanceType: instanceType,
 		CatalogItem:  me.CatalogItem,
 		TenantTier:   tenantTier,
@@ -221,18 +225,26 @@ func (r *Rater) tryRuleEngine(ctx context.Context, me inventory.MeteringEntry) (
 		Value:        me.Value,
 	})
 	if err != nil {
-		r.logger.Warn("rule engine evaluation failed, falling back to static rate",
-			"resource", me.ResourceID, "error", err)
+		r.logger.Warn("rule engine evaluation failed for rate card, falling back to static rate",
+			"rule", rate.RuleName, "rate_id", rate.ID, "resource", me.ResourceID, "error", err)
 		return inventory.CostEntry{}, false
 	}
 
-	r.logger.Debug("rule engine rated entry",
-		"resource", me.ResourceID, "instance_type", instanceType,
-		"tenant_tier", tenantTier, "cost", output.CostAmount,
-		"effective_rate", output.EffectiveRate)
+	r.logger.Debug("rule rate evaluated entry",
+		"resource", me.ResourceID, "rule", rate.RuleName, "rate_id", rate.ID,
+		"cost", output.CostAmount, "effective_rate", output.EffectiveRate)
+
+	curr := output.Currency
+	if curr == "" {
+		curr = rate.Currency
+	}
+	if curr == "" {
+		curr = "USD"
+	}
 
 	return inventory.CostEntry{
 		MeteringEntryID: me.ID,
+		RateID:          rate.ID,
 		TenantID:        me.TenantID,
 		ProjectID:       me.ProjectID,
 		UserID:          me.UserID,
@@ -241,7 +253,7 @@ func (r *Rater) tryRuleEngine(ctx context.Context, me inventory.MeteringEntry) (
 		MeterName:       me.MeterName,
 		MeteredValue:    me.Value,
 		CostAmount:      decimal.NewFromFloat(output.CostAmount),
-		Currency:        output.Currency,
+		Currency:        curr,
 		PeriodStart:     me.PeriodStart,
 		PeriodEnd:       me.PeriodEnd,
 	}, true

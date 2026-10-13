@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 
 	"github.com/osac-project/cost-event-consumer/internal/billing"
@@ -1017,8 +1018,27 @@ func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	price, err := decimal.NewFromString(req.PricePerUnit)
-	if err != nil {
+	ruleName := ""
+	if req.RuleName != nil {
+		ruleName = strings.TrimSpace(*req.RuleName)
+	}
+
+	if ruleName != "" {
+		if _, err := h.store.GetPricingRule(r.Context(), ruleName); err != nil {
+			writeErrorJSON(w, "referenced rule does not exist: "+ruleName, http.StatusBadRequest)
+			return
+		}
+	}
+
+	price := decimal.Zero
+	if req.PricePerUnit != "" {
+		p, err := decimal.NewFromString(req.PricePerUnit)
+		if err != nil {
+			writeErrorJSON(w, "invalid price_per_unit decimal value", http.StatusBadRequest)
+			return
+		}
+		price = p
+	} else if ruleName == "" {
 		writeErrorJSON(w, "invalid price_per_unit decimal value", http.StatusBadRequest)
 		return
 	}
@@ -1105,6 +1125,7 @@ func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
 		TierMode:      tierMode,
 		TierPeriod:    tierPeriod,
 		Description:   description,
+		RuleName:      ruleName,
 		EffectiveFrom: effectiveFrom,
 		EffectiveTo:   req.EffectiveTo,
 	}
@@ -2054,6 +2075,13 @@ func (h *APIHandler) GetRatesUI(w http.ResponseWriter, r *http.Request) {
 //
 // These are always registered so existing bookmarks and links continue to work
 // regardless of whether the debug dashboard is enabled.
+// RegisterLegacyRoutes registers backwards-compatible redirects for legacy UI paths
+// as well as custom GoRules API endpoints:
+//   - GET /reports -> /ui/reports
+//   - GET /rates -> /ui/rates
+//
+// These are always registered so existing bookmarks and links continue to work
+// regardless of whether the debug dashboard is enabled.
 func (h *APIHandler) RegisterLegacyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /reports", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/reports", http.StatusMovedPermanently)
@@ -2061,6 +2089,110 @@ func (h *APIHandler) RegisterLegacyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /rates", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/rates", http.StatusMovedPermanently)
 	})
+}
+
+// UpsertRuleRequest defines the payload for creating or updating a GoRules decision model.
+type UpsertRuleRequest struct {
+	Name     string          `json:"name"`
+	RuleJSON json.RawMessage `json:"rule_json"`
+}
+
+// ListRules lists all configured GoRules decision models in the database.
+func (h *APIHandler) ListRules(w http.ResponseWriter, r *http.Request) {
+	rules, err := h.store.AllPricingRules(r.Context())
+	if err != nil {
+		h.logger.Error("list rules failed", "error", err)
+		writeErrorJSON(w, "failed to list rules", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"rules": rules, "count": len(rules)})
+}
+
+// GetRule returns a single GoRules decision model by name.
+func (h *APIHandler) GetRule(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" {
+		name = r.PathValue("name")
+	}
+	if name == "" {
+		writeErrorJSON(w, "rule name is required", http.StatusBadRequest)
+		return
+	}
+	rule, err := h.store.GetPricingRule(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeErrorJSON(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		h.logger.Error("get rule failed", "name", name, "error", err)
+		writeErrorJSON(w, "failed to get rule", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, rule)
+}
+
+// CreateOrUpdateRule upserts a GoRules decision model in the database.
+func (h *APIHandler) CreateOrUpdateRule(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+	var req UpsertRuleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorJSON(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeErrorJSON(w, "rule name is required", http.StatusBadRequest)
+		return
+	}
+	if len(req.RuleJSON) == 0 {
+		writeErrorJSON(w, "rule_json is required", http.StatusBadRequest)
+		return
+	}
+	var js json.RawMessage
+	if err := json.Unmarshal(req.RuleJSON, &js); err != nil {
+		writeErrorJSON(w, "rule_json must be valid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := h.store.UpsertPricingRule(r.Context(), req.Name, req.RuleJSON); err != nil {
+		h.logger.Error("upsert rule failed", "name", req.Name, "error", err)
+		writeErrorJSON(w, "failed to save rule", http.StatusInternalServerError)
+		return
+	}
+
+	rule, err := h.store.GetPricingRule(r.Context(), req.Name)
+	if err != nil {
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]any{"name": req.Name, "status": "saved"})
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, rule)
+}
+
+// DeleteRule deletes a GoRules decision model by name.
+func (h *APIHandler) DeleteRule(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" {
+		name = r.PathValue("name")
+	}
+	if name == "" {
+		writeErrorJSON(w, "rule name is required", http.StatusBadRequest)
+		return
+	}
+	found, err := h.store.DeletePricingRule(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, inventory.ErrRuleInUse) {
+			writeErrorJSON(w, err.Error(), http.StatusConflict)
+			return
+		}
+		h.logger.Error("delete rule failed", "name", name, "error", err)
+		writeErrorJSON(w, "failed to delete rule", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		writeErrorJSON(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // RegisterDebugRoutes registers debug-only routes (e.g. legacy redirect for debug dashboard).
