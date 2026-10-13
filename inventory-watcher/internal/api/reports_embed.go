@@ -68,10 +68,12 @@ const reportsHTML = `<!DOCTYPE html>
 
   /* Tabs */
   .tabs { display: flex; gap: 0; margin-bottom: 1.25rem; border-bottom: 2px solid var(--border); }
-  .tab { padding: 0.6rem 1.25rem; cursor: pointer; font-size: 0.88rem;
+  .tab { padding: 0.6rem 1.25rem; cursor: pointer; font-size: 0.88rem; font-family: inherit;
+         background: none; border: none;
          color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -2px; }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
   .tab:hover:not(.active) { color: var(--text); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   /* Cards and tables */
   .card { background: white; border: 1px solid var(--border); border-radius: 8px;
@@ -168,11 +170,11 @@ const reportsHTML = `<!DOCTYPE html>
 <div class="content">
   <div id="errorBanner" class="error-banner" style="display:none"></div>
 
-  <div class="tabs">
-    <div class="tab active" data-tab="orgs" onclick="switchTab(this)">By Organization</div>
-    <div class="tab" data-tab="resources" onclick="switchTab(this)">By Resource Type</div>
-    <div class="tab" data-tab="breakdown" onclick="switchTab(this)">Line-Item Breakdown</div>
-    <div class="tab" data-tab="quotas" onclick="switchTab(this)">Quota Status</div>
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="orgs" role="tab" onclick="switchTab(this)">By Organization</button>
+    <button class="tab" data-tab="resources" role="tab" onclick="switchTab(this)">By Resource Type</button>
+    <button class="tab" data-tab="breakdown" role="tab" onclick="switchTab(this)">Line-Item Breakdown</button>
+    <button class="tab" data-tab="quotas" role="tab" onclick="switchTab(this)">Quota Status</button>
   </div>
 
   <div id="tabOrgs">
@@ -374,7 +376,11 @@ function fmt(raw) {
   return '$' + n.toFixed(6);
 }
 function fmtNum(n) { return n.toLocaleString(); }
-function esc(s) { const d = document.createElement('div'); d.textContent = String(s||''); return d.innerHTML; }
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = String(s || '');
+  return d.innerHTML.replace(/"/g, '&quot;');
+}
 
 function switchTab(el) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -621,18 +627,43 @@ async function exportCSV() {
   try {
     const period = $('period').value;
     const org = $('orgFilter').value;
-    let url = '';
-    let filename = 'costs-' + currentTab + '-' + (period || 'all') + '.csv';
+    const tok = getToken();
+    const headers = {};
+    if (tok) headers['Authorization'] = 'Bearer ' + tok;
 
     if (currentTab === 'orgs') {
-      url = '/api/v1/reports/costs?group_by=tenant&format=csv';
+      let url = '/api/v1/reports/costs?group_by=tenant&format=csv';
       if (period) url += '&period=' + encodeURIComponent(period);
       if (org) url += '&tenant_id=' + encodeURIComponent(org);
-    } else if (currentTab === 'resources') {
-      url = '/api/v1/reports/costs?group_by=resource_type&format=csv';
-      if (period) url += '&period=' + encodeURIComponent(period);
-    } else if (currentTab === 'breakdown') {
-      url = '/api/v1/reports/breakdown?format=csv&limit=1000';
+      const res = await fetch(window.location.origin + url, { headers });
+      if (res.status === 401) { showTokenModal(); return; }
+      if (!res.ok) throw new Error('Export failed: ' + res.statusText);
+      const blob = await res.blob();
+      downloadBlob(blob, 'costs-orgs-' + (period || 'all') + '.csv');
+      return;
+    }
+
+    if (currentTab === 'resources') {
+      let rUrl = '/api/v1/reports/costs?group_by=resource_type&format=csv';
+      let mUrl = '/api/v1/reports/costs?group_by=meter&format=csv';
+      if (period) {
+        rUrl += '&period=' + encodeURIComponent(period);
+        mUrl += '&period=' + encodeURIComponent(period);
+      }
+      const [rRes, mRes] = await Promise.all([
+        fetch(window.location.origin + rUrl, { headers }),
+        fetch(window.location.origin + mUrl, { headers }),
+      ]);
+      if (rRes.status === 401 || mRes.status === 401) { showTokenModal(); return; }
+      if (!rRes.ok || !mRes.ok) throw new Error('Export failed');
+      const [rCsv, mCsv] = await Promise.all([rRes.text(), mRes.text()]);
+      const combined = '# Costs by Resource Type\n' + rCsv.trim() + '\n\n# Costs by Meter\n' + mCsv.trim() + '\n';
+      downloadBlob(new Blob([combined], { type: 'text/csv' }), 'costs-resources-' + (period || 'all') + '.csv');
+      return;
+    }
+
+    if (currentTab === 'breakdown') {
+      let url = '/api/v1/reports/breakdown?format=csv&limit=1000';
       if (period) {
         const [y, m] = period.split('-').map(Number);
         const from = new Date(Date.UTC(y, m - 1, 1)).toISOString();
@@ -640,12 +671,31 @@ async function exportCSV() {
         url += '&from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to);
       }
       if (org) url += '&tenant_id=' + encodeURIComponent(org);
-      filename = 'breakdown-' + (period || 'all') + '.csv';
-    } else if (currentTab === 'quotas') {
+      const res = await fetch(window.location.origin + url, { headers });
+      if (res.status === 401) { showTokenModal(); return; }
+      if (!res.ok) throw new Error('Export failed: ' + res.statusText);
+      const text = await res.text();
+      const lines = text.trim().split('\n');
+      // If header + 1000 rows, explicitly flag that limit was reached
+      if (lines.length >= 1001) {
+        const notice = '# Note: Export capped at 1,000 records. Filter by organization or narrow date range for smaller subsets.\n';
+        downloadBlob(new Blob([notice + text], { type: 'text/csv' }), 'breakdown-' + (period || 'all') + '.csv');
+        return;
+      }
+      downloadBlob(new Blob([text], { type: 'text/csv' }), 'breakdown-' + (period || 'all') + '.csv');
+      return;
+    }
+
+    if (currentTab === 'quotas') {
+      function csvCell(v) {
+        let s = String(v ?? '').trim();
+        if (/^[=+\-@]/.test(s)) s = "'" + s;
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
       const rows = Array.from(document.querySelectorAll('#quotaBody tr'));
       let csv = 'Organization,Meter,Consumed,Limit,Status\n';
       rows.forEach(tr => {
-        const cols = Array.from(tr.querySelectorAll('td')).map(td => '"' + td.textContent.replace(/"/g, '""').trim() + '"');
+        const cols = Array.from(tr.querySelectorAll('td')).map(td => csvCell(td.textContent));
         if (cols.length >= 6) {
           csv += [cols[0], cols[1], cols[2], cols[3], cols[5]].join(',') + '\n';
         }
@@ -653,18 +703,6 @@ async function exportCSV() {
       downloadBlob(new Blob([csv], { type: 'text/csv' }), 'quotas-' + (period || 'all') + '.csv');
       return;
     }
-
-    const headers = {};
-    const tok = getToken();
-    if (tok) headers['Authorization'] = 'Bearer ' + tok;
-    const res = await fetch(window.location.origin + url, { headers });
-    if (res.status === 401) {
-      showTokenModal();
-      return;
-    }
-    if (!res.ok) throw new Error('Export failed: ' + res.statusText);
-    const blob = await res.blob();
-    downloadBlob(blob, filename);
   } catch (err) {
     alert('Failed to export CSV: ' + err.message);
   } finally {
