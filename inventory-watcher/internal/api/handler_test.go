@@ -2492,6 +2492,39 @@ func TestGetRatesUI(t *testing.T) {
 	}
 }
 
+func TestGetReportsUI(t *testing.T) {
+	h := api.NewAPIHandler(nil, nil, nil, nil, testLogger)
+	req := httptest.NewRequest(http.MethodGet, "/ui/reports", nil)
+	w := httptest.NewRecorder()
+	h.GetReports(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") {
+		t.Errorf("expected text/html Content-Type, got %q", contentType)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "Cost Management") {
+		t.Errorf("expected HTML body to contain 'Cost Management'")
+	}
+	if !strings.Contains(bodyStr, "Line-Item Breakdown") {
+		t.Errorf("expected HTML body to contain 'Line-Item Breakdown'")
+	}
+	if !strings.Contains(bodyStr, "exportCSV") {
+		t.Errorf("expected HTML body to contain 'exportCSV'")
+	}
+	if !strings.Contains(bodyStr, "/api/v1/reports/breakdown") {
+		t.Errorf("expected HTML body to contain '/api/v1/reports/breakdown'")
+	}
+	if !strings.Contains(bodyStr, "tabBreakdown") {
+		t.Errorf("expected HTML body to contain 'tabBreakdown'")
+	}
+}
+
 func TestUIRoutesAndRedirects(t *testing.T) {
 	h := api.NewAPIHandler(nil, nil, nil, nil, testLogger)
 
