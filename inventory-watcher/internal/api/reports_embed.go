@@ -167,6 +167,34 @@ const reportsHTML = `<!DOCTYPE html>
   <div class="kpi events"><div class="kpi-value" id="kResources">—</div><div class="kpi-label">Active Resources</div></div>
 </div>
 
+<!-- Summary charts: donut + top orgs bar chart -->
+<div style="padding:1rem 2rem 0;max-width:1400px;margin:0 auto">
+  <div style="display:grid;grid-template-columns:200px 1fr;gap:1rem">
+    <div class="card" style="padding:1.25rem;display:flex;flex-direction:column;align-items:center;justify-content:center">
+      <div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:0.75rem">Cost Split</div>
+      <svg width="110" height="110" viewBox="0 0 120 120">
+        <circle cx="60" cy="60" r="46" fill="none" stroke="#f0f4f8" stroke-width="18"/>
+        <circle id="donutInfra" cx="60" cy="60" r="46" fill="none" stroke="var(--blue)"
+                stroke-width="18" stroke-dasharray="0 289" stroke-linecap="butt"
+                transform="rotate(-90 60 60)" style="transition:stroke-dasharray 0.4s"/>
+        <circle id="donutSupp" cx="60" cy="60" r="46" fill="none" stroke="var(--purple)"
+                stroke-width="18" stroke-dasharray="0 289" stroke-linecap="butt"
+                transform="rotate(-90 60 60)" style="transition:stroke-dasharray 0.4s"/>
+        <text x="60" y="57" text-anchor="middle" font-size="10" fill="var(--muted)">infra</text>
+        <text x="60" y="70" text-anchor="middle" font-size="12" id="donutPct" fill="var(--text)" font-weight="700">—%</text>
+      </svg>
+      <div style="display:flex;gap:0.75rem;margin-top:0.5rem;font-size:0.76rem;color:var(--muted)">
+        <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--blue);margin-right:3px;vertical-align:middle"></span>Infra</span>
+        <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--purple);margin-right:3px;vertical-align:middle"></span>Usage</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">Cost by Organization</div>
+      <div id="barChart" style="padding:0.75rem 1.25rem 0.5rem"></div>
+    </div>
+  </div>
+</div>
+
 <div class="content">
   <div id="errorBanner" class="error-banner" style="display:none"></div>
 
@@ -265,34 +293,6 @@ const reportsHTML = `<!DOCTYPE html>
         </tr></thead>
         <tbody id="quotaBody"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
       </table>
-    </div>
-  </div>
-</div>
-
-<!-- Chart row: donut + bar chart -->
-<div style="padding:1rem 2rem 0;max-width:1400px;margin:0 auto">
-  <div style="display:grid;grid-template-columns:200px 1fr;gap:1rem">
-    <div class="card" style="padding:1.25rem;display:flex;flex-direction:column;align-items:center;justify-content:center">
-      <div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:0.75rem">Cost Split</div>
-      <svg width="110" height="110" viewBox="0 0 120 120">
-        <circle cx="60" cy="60" r="46" fill="none" stroke="#f0f4f8" stroke-width="18"/>
-        <circle id="donutInfra" cx="60" cy="60" r="46" fill="none" stroke="var(--blue)"
-                stroke-width="18" stroke-dasharray="0 289" stroke-linecap="butt"
-                transform="rotate(-90 60 60)" style="transition:stroke-dasharray 0.4s"/>
-        <circle id="donutSupp" cx="60" cy="60" r="46" fill="none" stroke="var(--purple)"
-                stroke-width="18" stroke-dasharray="0 289" stroke-linecap="butt"
-                transform="rotate(-90 60 60)" style="transition:stroke-dasharray 0.4s"/>
-        <text x="60" y="57" text-anchor="middle" font-size="10" fill="var(--muted)">infra</text>
-        <text x="60" y="70" text-anchor="middle" font-size="12" id="donutPct" fill="var(--text)" font-weight="700">—%</text>
-      </svg>
-      <div style="display:flex;gap:0.75rem;margin-top:0.5rem;font-size:0.76rem;color:var(--muted)">
-        <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--blue);margin-right:3px;vertical-align:middle"></span>Infra</span>
-        <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--purple);margin-right:3px;vertical-align:middle"></span>Usage</span>
-      </div>
-    </div>
-    <div class="card">
-      <div class="card-header">Cost by Organization</div>
-      <div id="barChart" style="padding:0.75rem 1.25rem 0.5rem"></div>
     </div>
   </div>
 </div>
