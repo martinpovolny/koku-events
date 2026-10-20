@@ -87,20 +87,37 @@ func New(issuerURL, caCertPath string, logger *slog.Logger) (*Middleware, error)
 // Wrap returns an HTTP handler that validates JWT tokens before calling next.
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	if m.issuerURL == "" {
-		return next
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if xRhHeader := r.Header.Get(HeaderXRhIdentity); xRhHeader != "" {
+				if id, err := ParseXRhIdentity(xRhHeader); err == nil {
+					r = r.WithContext(WithIdentity(r.Context(), id))
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" || r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/") ||
-			r.URL.Path == "/healthz" || r.URL.Path == "/readyz" ||
-			r.URL.Path == "/reports" || r.URL.Path == "/rates" || r.URL.Path == "/debug/dashboard" {
+		if isBypassPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
+			return
+		}
+
+		if xRhHeader := r.Header.Get(HeaderXRhIdentity); xRhHeader != "" {
+			identity, err := ParseXRhIdentity(xRhHeader)
+			if err != nil {
+				m.logger.Warn("invalid X-Rh-Identity header", "error", err)
+				writeAuthError(w, "invalid X-Rh-Identity: "+err.Error())
+				return
+			}
+			ctx := WithIdentity(r.Context(), identity)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			writeAuthError(w, "missing Authorization header")
+			writeAuthError(w, "missing authentication credentials (Authorization or X-Rh-Identity)")
 			return
 		}
 
@@ -117,9 +134,17 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), claimsKey, claims)
+		identity := IdentityFromJWTClaims(claims)
+		ctx := WithIdentity(r.Context(), identity)
+		ctx = context.WithValue(ctx, claimsKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func isBypassPath(path string) bool {
+	return path == "/" || path == "/ui" || strings.HasPrefix(path, "/ui/") ||
+		path == "/healthz" || path == "/readyz" || path == "/metrics" ||
+		path == "/reports" || path == "/rates" || path == "/debug/dashboard"
 }
 
 func (m *Middleware) validateToken(bearer string) (jwt.MapClaims, error) {
