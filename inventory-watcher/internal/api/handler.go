@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 
+	"github.com/osac-project/cost-event-consumer/internal/authn"
 	"github.com/osac-project/cost-event-consumer/internal/billing"
 	"github.com/osac-project/cost-event-consumer/internal/config"
 	"github.com/osac-project/cost-event-consumer/internal/custommetrics"
@@ -367,10 +368,23 @@ func writeEventError(w http.ResponseWriter, err error) {
 }
 
 func (h *APIHandler) processEvents(ctx context.Context, events []cloudEventInternal) error {
+	if ident, ok := authn.IdentityFromContext(ctx); ok && !ident.IsOrgAdmin {
+		for _, ce := range events {
+			_, _, eventTenant := classifyEvent(ce)
+			if eventTenant != "" && eventTenant != ident.OrgID {
+				return &eventValidationError{message: fmt.Sprintf("event tenant %q does not match authenticated identity %q", eventTenant, ident.OrgID)}
+			}
+		}
+	}
+
 	for _, ce := range events {
 		if err := h.validateCloudEvent(ce); err != nil {
 			return err
 		}
+	}
+
+	if h.store == nil {
+		return nil
 	}
 
 	if err := h.store.InTransaction(ctx, func(txStore *inventory.Store) error {
@@ -1173,6 +1187,11 @@ func (h *APIHandler) CreateQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := enforceTenant(r.Context(), &q.TenantID); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
 	if q.TenantID == "" || q.MeterName == "" || q.Unit == "" {
 		writeErrorJSON(w, "tenant_id, meter_name, and unit are required", http.StatusBadRequest)
 		return
@@ -1221,6 +1240,10 @@ func (h *APIHandler) ListQuotas(w http.ResponseWriter, r *http.Request, params L
 	var tenantID string
 	if params.TenantId != nil {
 		tenantID = *params.TenantId
+	}
+	if err := enforceTenant(r.Context(), &tenantID); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
 	}
 	withStatus := params.Status != nil && *params.Status == True
 
@@ -1287,6 +1310,18 @@ func (h *APIHandler) ListQuotas(w http.ResponseWriter, r *http.Request, params L
 func (h *APIHandler) DeleteQuota(w http.ResponseWriter, r *http.Request, id int64) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	if ident, ok := authn.IdentityFromContext(r.Context()); ok && !ident.IsOrgAdmin {
+		existing, err := h.store.GetQuota(r.Context(), id)
+		if err != nil {
+			writeErrorJSON(w, "quota not found", http.StatusNotFound)
+			return
+		}
+		if existing.TenantID != ident.OrgID {
+			writeErrorJSON(w, "forbidden: tenant mismatch", http.StatusForbidden)
+			return
+		}
+	}
+
 	if err := h.store.SoftDeleteQuota(r.Context(), id); err != nil {
 		writeErrorJSON(w, err.Error(), http.StatusNotFound)
 		return
@@ -1304,6 +1339,18 @@ func (h *APIHandler) UpdateQuota(w http.ResponseWriter, r *http.Request, id int6
 	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
 		writeErrorJSON(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	if ident, ok := authn.IdentityFromContext(r.Context()); ok && !ident.IsOrgAdmin {
+		existing, err := h.store.GetQuota(r.Context(), id)
+		if err != nil {
+			writeErrorJSON(w, "quota not found", http.StatusNotFound)
+			return
+		}
+		if existing.TenantID != ident.OrgID || (q.TenantID != "" && q.TenantID != ident.OrgID) {
+			writeErrorJSON(w, "forbidden: tenant mismatch", http.StatusForbidden)
+			return
+		}
 	}
 
 	if q.Period != "" {
@@ -1341,6 +1388,10 @@ func (h *APIHandler) GetQuotaStatus(w http.ResponseWriter, r *http.Request, tena
 	}
 	if len(tenantID) > maxIDLength {
 		writeErrorJSON(w, "tenant_id exceeds maximum length", http.StatusBadRequest)
+		return
+	}
+	if err := enforceTenant(r.Context(), &tenantID); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
 		return
 	}
 
@@ -1705,6 +1756,25 @@ type costBreakdownMeta struct {
 	Filters map[string]string `json:"filters"`
 }
 
+// enforceTenant checks whether the request is allowed to access targetTenant.
+// If an authenticated identity is present and is not an org-admin:
+//   - If targetTenant is non-empty and does not match identity.OrgID, it returns an error.
+//   - If targetTenant is empty, it populates targetTenant with identity.OrgID.
+// If the user is an org-admin, or no identity is present (dev/unauthenticated mode), it returns nil.
+func enforceTenant(ctx context.Context, targetTenant *string) error {
+	id, ok := authn.IdentityFromContext(ctx)
+	if !ok || id.IsOrgAdmin {
+		return nil
+	}
+	if *targetTenant != "" && *targetTenant != id.OrgID {
+		return fmt.Errorf("forbidden: tenant mismatch")
+	}
+	if *targetTenant == "" {
+		*targetTenant = id.OrgID
+	}
+	return nil
+}
+
 // GetCostReport implements ServerInterface.
 func (h *APIHandler) GetCostReport(w http.ResponseWriter, r *http.Request, params GetCostReportParams) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1712,6 +1782,10 @@ func (h *APIHandler) GetCostReport(w http.ResponseWriter, r *http.Request, param
 	var tenantID, resourceType string
 	if params.TenantId != nil {
 		tenantID = *params.TenantId
+	}
+	if err := enforceTenant(r.Context(), &tenantID); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
 	}
 	if params.ResourceType != nil {
 		resourceType = *params.ResourceType
@@ -1845,6 +1919,10 @@ func (h *APIHandler) GetCostBreakdown(w http.ResponseWriter, r *http.Request, pa
 	if params.TenantId != nil {
 		tenantID = *params.TenantId
 	}
+	if err := enforceTenant(r.Context(), &tenantID); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if params.ResourceType != nil {
 		resourceType = *params.ResourceType
 	}
@@ -1956,6 +2034,11 @@ func (h *APIHandler) GetPipelineSummary(w http.ResponseWriter, r *http.Request) 
 // GetEntitlementValue implements ServerInterface.
 func (h *APIHandler) GetEntitlementValue(w http.ResponseWriter, r *http.Request, customerID string, featureKey string, params GetEntitlementValueParams) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if err := enforceTenant(r.Context(), &customerID); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 
 	_ = featureKey // available for future feature-scoped quotas
 
