@@ -177,6 +177,34 @@ const reportsHTML = `<!DOCTYPE html>
     <button class="tab" data-tab="quotas" role="tab" onclick="switchTab(this)">Quota Status</button>
   </div>
 
+  <!-- Summary charts: donut + bar chart (above the long tables in all 4 tabs) -->
+  <div id="summaryCharts" style="margin-bottom:1.5rem">
+    <div style="display:grid;grid-template-columns:220px 1fr;gap:1rem">
+      <div class="card" style="padding:1.25rem;display:flex;flex-direction:column;align-items:center;justify-content:center">
+        <div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:0.75rem">Cost Split</div>
+        <svg width="110" height="110" viewBox="0 0 120 120">
+          <circle cx="60" cy="60" r="46" fill="none" stroke="#f0f4f8" stroke-width="18"/>
+          <circle id="donutInfra" cx="60" cy="60" r="46" fill="none" stroke="var(--blue)"
+                  stroke-width="18" stroke-dasharray="0 289" stroke-linecap="butt"
+                  transform="rotate(-90 60 60)" style="transition:stroke-dasharray 0.4s"/>
+          <circle id="donutSupp" cx="60" cy="60" r="46" fill="none" stroke="var(--purple)"
+                  stroke-width="18" stroke-dasharray="0 289" stroke-linecap="butt"
+                  transform="rotate(-90 60 60)" style="transition:stroke-dasharray 0.4s"/>
+          <text x="60" y="57" text-anchor="middle" font-size="10" fill="var(--muted)">infra</text>
+          <text x="60" y="70" text-anchor="middle" font-size="12" id="donutPct" fill="var(--text)" font-weight="700">—%</text>
+        </svg>
+        <div style="display:flex;gap:0.75rem;margin-top:0.5rem;font-size:0.76rem;color:var(--muted)">
+          <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--blue);margin-right:3px;vertical-align:middle"></span>Infra</span>
+          <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--purple);margin-right:3px;vertical-align:middle"></span>Usage</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header" id="barChartTitle">Cost by Organization</div>
+        <div id="barChart" style="padding:0.75rem 1.25rem 0.5rem"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="tabOrgs">
     <div class="card">
       <div class="card-header">
@@ -265,34 +293,6 @@ const reportsHTML = `<!DOCTYPE html>
         </tr></thead>
         <tbody id="quotaBody"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
       </table>
-    </div>
-  </div>
-</div>
-
-<!-- Chart row: donut + bar chart -->
-<div style="padding:1rem 2rem 0;max-width:1400px;margin:0 auto">
-  <div style="display:grid;grid-template-columns:200px 1fr;gap:1rem">
-    <div class="card" style="padding:1.25rem;display:flex;flex-direction:column;align-items:center;justify-content:center">
-      <div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:0.75rem">Cost Split</div>
-      <svg width="110" height="110" viewBox="0 0 120 120">
-        <circle cx="60" cy="60" r="46" fill="none" stroke="#f0f4f8" stroke-width="18"/>
-        <circle id="donutInfra" cx="60" cy="60" r="46" fill="none" stroke="var(--blue)"
-                stroke-width="18" stroke-dasharray="0 289" stroke-linecap="butt"
-                transform="rotate(-90 60 60)" style="transition:stroke-dasharray 0.4s"/>
-        <circle id="donutSupp" cx="60" cy="60" r="46" fill="none" stroke="var(--purple)"
-                stroke-width="18" stroke-dasharray="0 289" stroke-linecap="butt"
-                transform="rotate(-90 60 60)" style="transition:stroke-dasharray 0.4s"/>
-        <text x="60" y="57" text-anchor="middle" font-size="10" fill="var(--muted)">infra</text>
-        <text x="60" y="70" text-anchor="middle" font-size="12" id="donutPct" fill="var(--text)" font-weight="700">—%</text>
-      </svg>
-      <div style="display:flex;gap:0.75rem;margin-top:0.5rem;font-size:0.76rem;color:var(--muted)">
-        <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--blue);margin-right:3px;vertical-align:middle"></span>Infra</span>
-        <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--purple);margin-right:3px;vertical-align:middle"></span>Usage</span>
-      </div>
-    </div>
-    <div class="card">
-      <div class="card-header">Cost by Organization</div>
-      <div id="barChart" style="padding:0.75rem 1.25rem 0.5rem"></div>
     </div>
   </div>
 </div>
@@ -428,14 +428,16 @@ function updateDonut(infra, supp) {
   $('donutPct').textContent = (infra / total * 100).toFixed(0) + '%';
 }
 
-function updateBarChart(rows) {
+function updateBarChart(rows, title, labelMap) {
+  if (title && $('barChartTitle')) $('barChartTitle').textContent = title;
   if (!rows || rows.length === 0) { $('barChart').innerHTML = '<p style="color:var(--muted);font-size:0.85rem;padding:0.5rem 0">No data</p>'; return; }
   const max = Math.max(...rows.map(r => parseFloat(r.cost) || 0), 0.001);
   const top = rows.slice(0, 8);
   $('barChart').innerHTML = top.map(row => {
     const w = ((parseFloat(row.cost)||0) / max * 100).toFixed(1);
-    return '<div style="display:grid;grid-template-columns:140px 1fr 80px;align-items:center;gap:0.75rem;margin-bottom:0.5rem">' +
-      '<span style="font-size:0.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(row.group) + '">' + esc(row.group || '—') + '</span>' +
+    const label = (labelMap && labelMap[row.group]) ? labelMap[row.group] : (row.group || '—');
+    return '<div style="display:grid;grid-template-columns:160px 1fr 80px;align-items:center;gap:0.75rem;margin-bottom:0.5rem">' +
+      '<span style="font-size:0.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(label) + '">' + esc(label) + '</span>' +
       '<div style="background:#f0f4f8;border-radius:3px;height:8px;overflow:hidden"><div style="height:100%;width:' + w + '%;background:var(--accent);border-radius:3px;transition:width 0.4s"></div></div>' +
       '<span style="font-size:0.82rem;text-align:right;font-family:monospace">' + fmt(parseFloat(row.cost)||0) + '</span>' +
     '</div>';
@@ -459,7 +461,7 @@ async function loadCostByOrg() {
   $('kSupp').textContent = fmt(ts);
   $('orgPeriodLabel').textContent = d.meta.period || '';
   updateDonut(ti, ts);
-  updateBarChart(d.data);
+  updateBarChart(d.data, 'Cost by Organization');
 
   // Populate org filter
   const sel = $('orgFilter');
@@ -499,6 +501,7 @@ async function loadCostByResource() {
   let url = '/api/v1/reports/costs?group_by=resource_type';
   if (period) url += '&period=' + period;
   const d = await api(url);
+  updateBarChart(d.data, 'Cost by Resource Type', RESOURCE_LABELS);
   function tv2(f) { return parseFloat(f?.total?.value ?? f?.value ?? f) || 0; }
   const total = tv2(d.meta.total.cost) || 0.001;
 
