@@ -5,12 +5,12 @@
 To integrate the `cost-event-consumer` service with the on-premises Koku architecture (managed by `koku-service-operator`), this design specifies:
 1. **Gateway Path Mapping**: External path `/api/cost-events/` mapped via Envoy `prefix_rewrite: "/api/"` to our backend service at `/api/`.
 2. **Dual-Authentication Strategy**:
-   - **Gateway Mode**: Parse and trust the base64-encoded `X-Rh-Identity` header synthesized by Envoy's Lua filter after Envoy validates the JWT against Keycloak.
-   - **Direct Bearer Mode**: Support direct incoming `Authorization: Bearer <JWT>` tokens validated against Keycloak JWKS for direct API/CLI access and local development.
-3. **Tenant Scoping & Isolation**:
-   - Extract `OrgID` and administrative status (`IsOrgAdmin`) from identity.
-   - Restrict regular users to their assigned `OrgID` (returning `403 Forbidden` if attempting to access another tenant).
-   - Allow organization administrators (`is_org_admin: true`) to query across tenants or specify any tenant.
+   - **Gateway Mode**: Parse and trust the base64-encoded `X-Rh-Identity` header synthesized by Envoy's Lua filter after Envoy validates the JWT against Keycloak. This mode is gated behind the configuration setting `AUTH_TRUST_IDENTITY_HEADER=true` (default: `false`). The gateway must strip any client-supplied `X-Rh-Identity` headers before injecting its own.
+   - **Direct Bearer Mode**: Support direct incoming `Authorization: Bearer <JWT>` tokens validated against Keycloak JWKS for direct API/CLI access and local development. Bearer tokens must contain an `org_id` claim unless the principal is a platform administrator.
+3. **Tenant Scoping & Multi-Level Authorization**:
+   - Extract `OrgID`, `IsOrgAdmin` (organization-scoped administrator), and `IsPlatformAdmin` (cross-tenant platform administrator).
+   - Restrict regular users and organization administrators to their assigned `OrgID` (returning `403 Forbidden` if attempting to access or mutate another tenant's data).
+   - Allow platform administrators (`cost-platform-admin` / `platform-admin`) to query or ingest across tenants or perform global queries.
 4. **Envoy Gateway Configuration**: Update `koku-service-operator` to declare the `cost-events-backend` cluster and routing rules.
 
 ---
@@ -98,33 +98,44 @@ The parsed representation in Go (`internal/authn/identity.go`):
 
 ```go
 type Identity struct {
-    OrgID         string
-    AccountNumber string
-    Username      string
-    Email         string
-    IsOrgAdmin    bool
-    RawAuthType   string // "x-rh-identity" or "bearer-jwt"
+    OrgID           string
+    AccountNumber   string
+    Username        string
+    Email           string
+    IsOrgAdmin      bool   // Administrator of the caller's own organization
+    IsPlatformAdmin bool   // Cross-tenant platform / service administrator
+    RawAuthType     string // "x-rh-identity" or "bearer-jwt"
 }
 ```
 
-### 3.2 Dual-Auth Resolution Logic
+### 3.2 Dual-Auth Resolution & Header Trust Logic
+
+To prevent unauthenticated or spoofed `X-Rh-Identity` injection from arbitrary pods in the cluster, `X-Rh-Identity` processing is strictly gated behind `AUTH_TRUST_IDENTITY_HEADER=true` (default: `false`):
+- **When `AUTH_TRUST_IDENTITY_HEADER=false` (Default)**: Any `X-Rh-Identity` header is ignored. The service requires a valid `Authorization: Bearer <JWT>` header validated against Keycloak's JWKS.
+- **When `AUTH_TRUST_IDENTITY_HEADER=true`**: The service parses and trusts `X-Rh-Identity`.
+- **Security Requirement**: The edge reverse proxy or Envoy gateway MUST strip any incoming client-supplied `X-Rh-Identity` headers before injecting its own synthesized header.
 
 ```mermaid
 flowchart TD
     Req[Incoming HTTP Request] --> CheckBypass{Is Bypass Path?<br/>/healthz, /readyz, /metrics, /ui*}
     CheckBypass -- Yes --> Allow[Serve Request without Auth]
-    CheckBypass -- No --> CheckXRh{Has X-Rh-Identity Header?}
+    CheckBypass -- No --> CheckTrust{AUTH_TRUST_IDENTITY_HEADER == true?}
     
+    CheckTrust -- Yes --> CheckXRh{Has X-Rh-Identity Header?}
+    CheckTrust -- No --> CheckBearer{Has Bearer Token?}
+
     CheckXRh -- Yes --> ParseXRh[Decode Base64 & Parse JSON]
     ParseXRh --> ValidXRh{Valid JSON & OrgID?}
     ValidXRh -- Yes --> SetCtx1[Store Identity in Context] --> Next[Execute Handler]
     ValidXRh -- No --> Err401["401 Unauthorized (Invalid Identity Header)"]
+    CheckXRh -- No --> CheckBearer
 
-    CheckXRh -- No --> CheckBearer{Has Bearer Token?}
     CheckBearer -- Yes --> ValidateJWT[Validate JWT signature & expiry via JWKS]
     ValidateJWT --> ValidJWT{JWT Valid?}
     ValidJWT -- Yes --> ExtractClaims[Extract OrgID, Username, Roles]
-    ExtractClaims --> SetCtx2[Store Identity in Context] --> Next
+    ExtractClaims --> CheckOrg{Has OrgID or IsPlatformAdmin?}
+    CheckOrg -- Yes --> SetCtx2[Store Identity in Context] --> Next
+    CheckOrg -- No --> Err401D["401 Unauthorized (Missing org_id claim)"]
     ValidJWT -- No --> Err401B["401 Unauthorized (Invalid Token)"]
 
     CheckBearer -- No --> CheckDev{Auth Disabled?<br/>AUTH_ISSUER_URL == ""}
@@ -134,11 +145,16 @@ flowchart TD
 
 ---
 
-## 4. Tenant Isolation & Authorization Enforcement
+## 4. Tenant Isolation & Multi-Level Authorization
 
-In `internal/api/handler.go`, handlers check the context's `Identity`:
+In Red Hat's multi-tenant architecture, administrative roles are clearly separated:
+- **`IsOrgAdmin` (Tenant Administrator)**: In Red Hat's identity model (`is_org_admin: true`), an org admin is the administrator of *their own organization only*. They have administrative privileges over resources and quotas within their own `OrgID`, but are strictly forbidden from inspecting, mutating, or ingesting data for other organizations.
+- **`IsPlatformAdmin` (Platform / Service Administrator)**: Cross-tenant administration is reserved for platform administrators (mapped from Keycloak roles `cost-platform-admin` or `platform-admin`, or `is_platform_admin: true`). Generic `admin` roles in Keycloak are never granted cross-tenant access.
 
-1. **Regular User (`IsOrgAdmin == false`)**:
+Handlers in `internal/api/handler.go` enforce these boundaries:
+
+1. **Regular Users & Organization Administrators (`IsPlatformAdmin == false`)**:
+   - Must have a non-empty `identity.OrgID` (requests with empty `OrgID` return `HTTP 403 Forbidden`).
    - If a `tenant_id` query/path parameter is supplied:
      - Check `req_tenant_id == identity.OrgID`.
      - If mismatch, respond with `HTTP 403 Forbidden`:
@@ -147,9 +163,15 @@ In `internal/api/handler.go`, handlers check the context's `Identity`:
        ```
    - If no `tenant_id` query parameter is provided (e.g. `GET /api/v1/reports/costs`):
      - Implicitly force `tenant_id = identity.OrgID` in the query filter.
-2. **Organization Administrator (`IsOrgAdmin == true`)**:
-   - Allowed to specify any `tenant_id` to inspect sub-tenants or accounts.
-   - Allowed to omit `tenant_id` to query aggregated costs across all tenants.
+   - For quota updates/deletions (`PUT /quotas/{id}`, `DELETE /quotas/{id}`):
+     - Existing quota's `TenantID` must match `identity.OrgID`.
+   - For event ingestion (`POST /api/v1/events/batch`):
+     - Each event's classified tenant must explicitly match `identity.OrgID`. Missing or mismatched event tenants return `eventValidationError` (HTTP 400).
+
+2. **Platform Administrators (`IsPlatformAdmin == true`)**:
+   - Permitted to specify any `tenant_id` to inspect sub-tenants or accounts.
+   - Permitted to omit `tenant_id` to query aggregated costs across all tenants.
+   - Permitted to ingest events for any tenant.
 
 ---
 

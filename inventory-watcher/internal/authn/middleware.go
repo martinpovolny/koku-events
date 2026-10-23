@@ -31,26 +31,31 @@ func ClaimsFromContext(ctx context.Context) (jwt.MapClaims, bool) {
 // Middleware validates JWT bearer tokens against a JWKS endpoint.
 // Compatible with OSAC's authentication model.
 type Middleware struct {
-	issuerURL string
-	jwksURL   string
-	keys      *sync.Map
-	caPool    *x509.CertPool
-	logger    *slog.Logger
-	client    *http.Client
+	issuerURL           string
+	jwksURL             string
+	trustIdentityHeader bool
+	keys                *sync.Map
+	caPool              *x509.CertPool
+	logger              *slog.Logger
+	client              *http.Client
 }
 
 // New creates a JWT authentication middleware. If issuerURL is empty,
 // authentication is disabled (all requests pass through).
-func New(issuerURL, caCertPath string, logger *slog.Logger) (*Middleware, error) {
+func New(issuerURL, caCertPath string, trustIdentityHeader bool, logger *slog.Logger) (*Middleware, error) {
 	if issuerURL == "" {
 		logger.Warn("authentication disabled — no issuer URL configured")
-		return &Middleware{logger: logger}, nil
+		return &Middleware{
+			trustIdentityHeader: trustIdentityHeader,
+			logger:              logger,
+		}, nil
 	}
 
 	m := &Middleware{
-		issuerURL: issuerURL,
-		keys:      &sync.Map{},
-		logger:    logger,
+		issuerURL:           issuerURL,
+		trustIdentityHeader: trustIdentityHeader,
+		keys:                &sync.Map{},
+		logger:              logger,
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -80,7 +85,7 @@ func New(issuerURL, caCertPath string, logger *slog.Logger) (*Middleware, error)
 		return nil, fmt.Errorf("initial JWKS fetch failed: %w", err)
 	}
 
-	logger.Info("JWT authentication enabled", "issuer", issuerURL, "jwks", jwksURL)
+	logger.Info("JWT authentication enabled", "issuer", issuerURL, "jwks", jwksURL, "trust_identity_header", trustIdentityHeader)
 	return m, nil
 }
 
@@ -88,9 +93,11 @@ func New(issuerURL, caCertPath string, logger *slog.Logger) (*Middleware, error)
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	if m.issuerURL == "" {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if xRhHeader := r.Header.Get(HeaderXRhIdentity); xRhHeader != "" {
-				if id, err := ParseXRhIdentity(xRhHeader); err == nil {
-					r = r.WithContext(WithIdentity(r.Context(), id))
+			if m.trustIdentityHeader {
+				if xRhHeader := r.Header.Get(HeaderXRhIdentity); xRhHeader != "" {
+					if id, err := ParseXRhIdentity(xRhHeader); err == nil {
+						r = r.WithContext(WithIdentity(r.Context(), id))
+					}
 				}
 			}
 			next.ServeHTTP(w, r)
@@ -103,21 +110,25 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		if xRhHeader := r.Header.Get(HeaderXRhIdentity); xRhHeader != "" {
-			identity, err := ParseXRhIdentity(xRhHeader)
-			if err != nil {
-				m.logger.Warn("invalid X-Rh-Identity header", "error", err)
-				writeAuthError(w, "invalid X-Rh-Identity: "+err.Error())
+		// Only trust X-Rh-Identity if explicitly configured (e.g. behind trusted gateway).
+		// Note: The trusted gateway must strip any client-supplied X-Rh-Identity headers before injecting its own.
+		if m.trustIdentityHeader {
+			if xRhHeader := r.Header.Get(HeaderXRhIdentity); xRhHeader != "" {
+				identity, err := ParseXRhIdentity(xRhHeader)
+				if err != nil {
+					m.logger.Warn("invalid X-Rh-Identity header", "error", err)
+					writeAuthError(w, "invalid X-Rh-Identity: "+err.Error())
+					return
+				}
+				ctx := WithIdentity(r.Context(), identity)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
-			ctx := WithIdentity(r.Context(), identity)
-			next.ServeHTTP(w, r.WithContext(ctx))
-			return
 		}
 
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			writeAuthError(w, "missing authentication credentials (Authorization or X-Rh-Identity)")
+			writeAuthError(w, "missing authentication credentials")
 			return
 		}
 
@@ -135,12 +146,19 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		}
 
 		identity := IdentityFromJWTClaims(claims)
+		if !identity.IsPlatformAdmin && identity.OrgID == "" {
+			m.logger.Warn("token missing org_id claim")
+			writeAuthError(w, "invalid token: missing org_id claim")
+			return
+		}
+
 		ctx := WithIdentity(r.Context(), identity)
 		ctx = context.WithValue(ctx, claimsKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
+// isBypassPath returns true when the request path does not require authentication.
 func isBypassPath(path string) bool {
 	return path == "/" || path == "/ui" || strings.HasPrefix(path, "/ui/") ||
 		path == "/healthz" || path == "/readyz" || path == "/metrics" ||

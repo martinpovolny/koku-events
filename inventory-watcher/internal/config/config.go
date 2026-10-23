@@ -24,6 +24,7 @@ type Config struct {
 	MetricsPort             string
 	CustomMetricsConfigPath string
 	AuthIssuerURL           string
+	AuthTrustIdentityHeader bool
 	DebugDashboard     bool
 	DisabledComponents map[string]bool
 	ReconcileEntities  map[string]bool
@@ -60,6 +61,7 @@ type DiagnosticInfo struct {
 	MetricsPort             string   `json:"metrics_port"`
 	CustomMetricsConfigPath string   `json:"custom_metrics_config_path"`
 	AuthIssuerURL           string   `json:"auth_issuer_url"`
+	AuthTrustIdentityHeader bool     `json:"auth_trust_identity_header"`
 	DebugDashboard          bool     `json:"debug_dashboard"`
 	OSACTokenSet            bool     `json:"osac_token_set"`
 	OSACCACertSet           bool     `json:"osac_ca_cert_set"`
@@ -73,6 +75,7 @@ type DiagnosticInfo struct {
 	KafkaSASLConfigured     bool     `json:"kafka_sasl_configured,omitempty"`
 }
 
+// Diagnostics returns a sanitized DiagnosticInfo snapshot of the configuration.
 func (c *Config) Diagnostics() DiagnosticInfo {
 	var reconcileEntities []string
 	for e := range c.ReconcileEntities {
@@ -93,6 +96,7 @@ func (c *Config) Diagnostics() DiagnosticInfo {
 		MetricsPort:             c.MetricsPort,
 		CustomMetricsConfigPath: c.CustomMetricsConfigPath,
 		AuthIssuerURL:           c.AuthIssuerURL,
+		AuthTrustIdentityHeader: c.AuthTrustIdentityHeader,
 		DebugDashboard:          c.DebugDashboard,
 		OSACTokenSet:            c.OSACToken != "",
 		OSACCACertSet:           c.OSACCACert != "",
@@ -133,6 +137,7 @@ func maskDBURL(url string) string {
 }
 
 
+// Load reads configuration settings from environment variables with defaults.
 func Load() *Config {
 	readerMode := strings.ToLower(strings.TrimSpace(envOrDefault("KAFKA_READER_MODE", "legacy")))
 	defaultKafkaMode := "both"
@@ -159,6 +164,7 @@ func Load() *Config {
 		MetricsPort:             envOrDefault("METRICS_PORT", "9000"),
 		CustomMetricsConfigPath: os.Getenv("CUSTOM_METRICS_CONFIG"),
 		AuthIssuerURL:           os.Getenv("AUTH_ISSUER_URL"),
+		AuthTrustIdentityHeader: os.Getenv("AUTH_TRUST_IDENTITY_HEADER") == "true",
 		DebugDashboard:          envOrDefault("DEBUG_DASHBOARD", "true") != "false",
 		DisabledComponents:      parseDisabledComponents(os.Getenv("DISABLE_COMPONENTS")),
 		ReconcileEntities:       parseReconcileEntities(os.Getenv("RECONCILE_ENTITIES")),
