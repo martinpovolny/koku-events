@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -61,6 +62,7 @@ func TestCloudEventDigestIsStable(t *testing.T) {
 	}
 }
 
+// TestEnforceTenant_Unauthenticated verifies enforceTenant allows unauthenticated requests in dev mode.
 func TestEnforceTenant_Unauthenticated(t *testing.T) {
 	ctx := context.Background()
 	tenant := "any-tenant"
@@ -80,30 +82,80 @@ func TestEnforceTenant_Unauthenticated(t *testing.T) {
 	}
 }
 
+// TestEnforceTenant_OrgAdmin verifies organization admins are scoped to their own OrgID.
 func TestEnforceTenant_OrgAdmin(t *testing.T) {
 	adminCtx := authn.WithIdentity(context.Background(), &authn.Identity{
 		OrgID:      "admin-org",
-		Username:   "admin",
+		Username:   "org-admin",
 		IsOrgAdmin: true,
 	})
 
-	tenant := "other-tenant"
-	if err := enforceTenant(adminCtx, &tenant); err != nil {
-		t.Fatalf("admin should be able to query any tenant, got err %v", err)
+	// 1. Same tenant succeeds
+	matchingTenant := "admin-org"
+	if err := enforceTenant(adminCtx, &matchingTenant); err != nil {
+		t.Fatalf("expected matching tenant to succeed for org admin, got %v", err)
 	}
-	if tenant != "other-tenant" {
-		t.Errorf("expected other-tenant, got %s", tenant)
+	if matchingTenant != "admin-org" {
+		t.Errorf("expected admin-org, got %s", matchingTenant)
 	}
 
+	// 2. Mismatched tenant is forbidden (IsOrgAdmin is scoped to their own OrgID)
+	otherTenant := "other-tenant"
+	if err := enforceTenant(adminCtx, &otherTenant); err == nil {
+		t.Fatal("expected error for mismatched tenant with org admin, got nil")
+	}
+
+	// 3. Empty tenant is populated with admin's OrgID
 	emptyTenant := ""
 	if err := enforceTenant(adminCtx, &emptyTenant); err != nil {
-		t.Fatalf("admin should be able to leave tenant empty, got err %v", err)
+		t.Fatalf("expected empty tenant to be populated with admin OrgID, got %v", err)
 	}
-	if emptyTenant != "" {
-		t.Errorf("expected emptyTenant to stay empty for admin global queries, got %s", emptyTenant)
+	if emptyTenant != "admin-org" {
+		t.Errorf("expected emptyTenant to be populated as admin-org, got %s", emptyTenant)
 	}
 }
 
+// TestEnforceTenant_PlatformAdmin verifies platform admins can query across all tenants.
+func TestEnforceTenant_PlatformAdmin(t *testing.T) {
+	platformCtx := authn.WithIdentity(context.Background(), &authn.Identity{
+		OrgID:           "platform-org",
+		Username:        "superadmin",
+		IsPlatformAdmin: true,
+	})
+
+	// 1. Can query any tenant
+	tenant := "any-customer-org"
+	if err := enforceTenant(platformCtx, &tenant); err != nil {
+		t.Fatalf("platform admin should be able to query any tenant, got err %v", err)
+	}
+	if tenant != "any-customer-org" {
+		t.Errorf("expected any-customer-org, got %s", tenant)
+	}
+
+	// 2. Can leave tenant empty for cross-tenant / global query
+	emptyTenant := ""
+	if err := enforceTenant(platformCtx, &emptyTenant); err != nil {
+		t.Fatalf("platform admin should be able to leave tenant empty, got err %v", err)
+	}
+	if emptyTenant != "" {
+		t.Errorf("expected emptyTenant to stay empty for platform admin global queries, got %s", emptyTenant)
+	}
+}
+
+// TestEnforceTenant_EmptyOrgID verifies non-platform identities without an OrgID are rejected.
+func TestEnforceTenant_EmptyOrgID(t *testing.T) {
+	ctx := authn.WithIdentity(context.Background(), &authn.Identity{
+		OrgID:    "",
+		Username: "no-org-user",
+	})
+
+	tenant := "some-tenant"
+	if err := enforceTenant(ctx, &tenant); err == nil {
+		t.Fatal("expected error when identity has empty OrgID, got nil")
+	}
+}
+
+// TestEnforceTenant_RegularUser verifies regular users are restricted to their authenticated OrgID.
 func TestEnforceTenant_RegularUser(t *testing.T) {
 	userCtx := authn.WithIdentity(context.Background(), &authn.Identity{
 		OrgID:      "tenant-100",
@@ -136,6 +188,7 @@ func TestEnforceTenant_RegularUser(t *testing.T) {
 	}
 }
 
+// TestProcessEvents_TenantIsolation verifies tenant isolation during event batch ingestion.
 func TestProcessEvents_TenantIsolation(t *testing.T) {
 	h := &APIHandler{logger: slog.Default()}
 
@@ -160,17 +213,63 @@ func TestProcessEvents_TenantIsolation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected tenant mismatch error, got nil")
 	}
+	var valErr *eventValidationError
+	if !errors.As(err, &valErr) {
+		t.Fatalf("expected *eventValidationError, got %T: %v", err, err)
+	}
 
 	// Case 2: Caller authenticated as tenant-1 ingests event for tenant-1
-	// (Note: will fail at DB transaction since h.store is nil, but passes tenant check)
 	ctxTenant1 := authn.WithIdentity(context.Background(), &authn.Identity{
 		OrgID:      "tenant-1",
 		Username:   "user1",
 		IsOrgAdmin: false,
 	})
 	err1 := h.processEvents(ctxTenant1, []cloudEventInternal{eventTenant1})
-	// Should NOT fail with tenant mismatch
-	if err1 != nil && err1.Error() == `event tenant "tenant-1" does not match authenticated identity "tenant-1"` {
-		t.Fatalf("unexpected tenant mismatch: %v", err1)
+	if err1 != nil {
+		t.Fatalf("expected nil error for matching tenant, got %v", err1)
+	}
+
+	// Case 3: Event with empty tenant is rejected for non-platform-admin
+	dataEmptyTenant, _ := json.Marshal(meteringData{
+		ResourceID: "vm-2", ResourceType: "compute_instance", TenantID: "",
+		CurrentState: "RUNNING", TransitionTime: time.Now().UTC().Format(time.RFC3339),
+		SchemaVersion: "v1",
+	})
+	eventEmptyTenant := cloudEventInternal{
+		SpecVersion: "1.0", ID: "event-empty", Source: "osac-metering", Type: eventTypeResourceCreated,
+		Time: time.Now().UTC(), Data: dataEmptyTenant,
+		OSACResourceID: "vm-2", OSACResourceType: "compute_instance", OSACTenant: "",
+	}
+	errEmpty := h.processEvents(ctxTenant1, []cloudEventInternal{eventEmptyTenant})
+	if errEmpty == nil {
+		t.Fatal("expected error for empty event tenant, got nil")
+	}
+	if !errors.As(errEmpty, &valErr) {
+		t.Fatalf("expected *eventValidationError for empty event tenant, got %T: %v", errEmpty, errEmpty)
+	}
+
+	// Case 4: Org admin of tenant-2 cannot ingest events for tenant-1
+	ctxOrgAdmin := authn.WithIdentity(context.Background(), &authn.Identity{
+		OrgID:      "tenant-2",
+		Username:   "admin2",
+		IsOrgAdmin: true,
+	})
+	errOrgAdmin := h.processEvents(ctxOrgAdmin, []cloudEventInternal{eventTenant1})
+	if errOrgAdmin == nil {
+		t.Fatal("expected tenant mismatch error for org admin of different tenant, got nil")
+	}
+	if !errors.As(errOrgAdmin, &valErr) {
+		t.Fatalf("expected *eventValidationError, got %T: %v", errOrgAdmin, errOrgAdmin)
+	}
+
+	// Case 5: Platform admin can ingest events for tenant-1
+	ctxPlatformAdmin := authn.WithIdentity(context.Background(), &authn.Identity{
+		OrgID:           "platform-org",
+		Username:        "superadmin",
+		IsPlatformAdmin: true,
+	})
+	errPlatform := h.processEvents(ctxPlatformAdmin, []cloudEventInternal{eventTenant1})
+	if errPlatform != nil {
+		t.Fatalf("expected nil error for platform admin, got %v", errPlatform)
 	}
 }

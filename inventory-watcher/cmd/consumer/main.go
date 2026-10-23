@@ -226,7 +226,7 @@ func main() {
 
 	if cfg.IngestListenAddr != "" {
 
-		auth, err := authn.New(cfg.AuthIssuerURL, cfg.OSACCACert, logger)
+		auth, err := authn.New(cfg.AuthIssuerURL, cfg.OSACCACert, cfg.AuthTrustIdentityHeader, logger)
 		if err != nil {
 			logger.Error("failed to create auth middleware", "error", err)
 			os.Exit(1)

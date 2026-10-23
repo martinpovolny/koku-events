@@ -13,12 +13,13 @@ import (
 
 // Identity represents the authenticated principal (user, service account, or system).
 type Identity struct {
-	OrgID         string `json:"org_id"`
-	AccountNumber string `json:"account_number,omitempty"`
-	Username      string `json:"username,omitempty"`
-	Email         string `json:"email,omitempty"`
-	IsOrgAdmin    bool   `json:"is_org_admin"`
-	RawAuthType   string `json:"raw_auth_type,omitempty"` // "x-rh-identity" or "bearer-jwt"
+	OrgID           string `json:"org_id"`
+	AccountNumber   string `json:"account_number,omitempty"`
+	Username        string `json:"username,omitempty"`
+	Email           string `json:"email,omitempty"`
+	IsOrgAdmin      bool   `json:"is_org_admin"`
+	IsPlatformAdmin bool   `json:"is_platform_admin,omitempty"`
+	RawAuthType     string `json:"raw_auth_type,omitempty"` // "x-rh-identity" or "bearer-jwt"
 }
 
 const (
@@ -193,12 +194,20 @@ func IdentityFromJWTClaims(claims jwt.MapClaims) *Identity {
 
 	if admin, ok := claims["is_org_admin"].(bool); ok {
 		id.IsOrgAdmin = admin
-	} else if realmAccess, ok := claims["realm_access"].(map[string]interface{}); ok {
+	}
+	if platformAdmin, ok := claims["is_platform_admin"].(bool); ok {
+		id.IsPlatformAdmin = platformAdmin
+	}
+	if realmAccess, ok := claims["realm_access"].(map[string]interface{}); ok {
 		if roles, ok := realmAccess["roles"].([]interface{}); ok {
 			for _, r := range roles {
-				if rStr, ok := r.(string); ok && (rStr == "org-admin" || rStr == "admin") {
-					id.IsOrgAdmin = true
-					break
+				if rStr, ok := r.(string); ok {
+					switch rStr {
+					case "org-admin":
+						id.IsOrgAdmin = true
+					case "cost-platform-admin", "platform-admin":
+						id.IsPlatformAdmin = true
+					}
 				}
 			}
 		}

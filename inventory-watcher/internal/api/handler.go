@@ -367,11 +367,21 @@ func writeEventError(w http.ResponseWriter, err error) {
 	}
 }
 
+// processEvents validates tenant isolation, CloudEvent schema, and persists a batch of events.
 func (h *APIHandler) processEvents(ctx context.Context, events []cloudEventInternal) error {
-	if ident, ok := authn.IdentityFromContext(ctx); ok && !ident.IsOrgAdmin {
+	if ident, ok := authn.IdentityFromContext(ctx); ok && !ident.IsPlatformAdmin {
+		if ident.OrgID == "" {
+			return &eventValidationError{message: "authenticated identity has no organization"}
+		}
 		for _, ce := range events {
 			_, _, eventTenant := classifyEvent(ce)
-			if eventTenant != "" && eventTenant != ident.OrgID {
+			if eventTenant == "" && h.customMetrics != nil && h.customMetrics.HasEventType(ce.Type) {
+				var dataMap map[string]interface{}
+				if err := json.Unmarshal(ce.Data, &dataMap); err == nil {
+					_, _, eventTenant = h.customMetrics.ClassifyEvent(ce.Type, dataMap)
+				}
+			}
+			if eventTenant == "" || eventTenant != ident.OrgID {
 				return &eventValidationError{message: fmt.Sprintf("event tenant %q does not match authenticated identity %q", eventTenant, ident.OrgID)}
 			}
 		}
@@ -1310,7 +1320,11 @@ func (h *APIHandler) ListQuotas(w http.ResponseWriter, r *http.Request, params L
 func (h *APIHandler) DeleteQuota(w http.ResponseWriter, r *http.Request, id int64) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	if ident, ok := authn.IdentityFromContext(r.Context()); ok && !ident.IsOrgAdmin {
+	if ident, ok := authn.IdentityFromContext(r.Context()); ok && !ident.IsPlatformAdmin {
+		if ident.OrgID == "" {
+			writeErrorJSON(w, "forbidden: identity has no organization", http.StatusForbidden)
+			return
+		}
 		existing, err := h.store.GetQuota(r.Context(), id)
 		if err != nil {
 			writeErrorJSON(w, "quota not found", http.StatusNotFound)
@@ -1341,7 +1355,11 @@ func (h *APIHandler) UpdateQuota(w http.ResponseWriter, r *http.Request, id int6
 		return
 	}
 
-	if ident, ok := authn.IdentityFromContext(r.Context()); ok && !ident.IsOrgAdmin {
+	if ident, ok := authn.IdentityFromContext(r.Context()); ok && !ident.IsPlatformAdmin {
+		if ident.OrgID == "" {
+			writeErrorJSON(w, "forbidden: identity has no organization", http.StatusForbidden)
+			return
+		}
 		existing, err := h.store.GetQuota(r.Context(), id)
 		if err != nil {
 			writeErrorJSON(w, "quota not found", http.StatusNotFound)
@@ -1757,14 +1775,23 @@ type costBreakdownMeta struct {
 }
 
 // enforceTenant checks whether the request is allowed to access targetTenant.
-// If an authenticated identity is present and is not an org-admin:
-//   - If targetTenant is non-empty and does not match identity.OrgID, it returns an error.
-//   - If targetTenant is empty, it populates targetTenant with identity.OrgID.
-// If the user is an org-admin, or no identity is present (dev/unauthenticated mode), it returns nil.
+// If an authenticated identity is present:
+//   - If identity is a platform administrator (IsPlatformAdmin), any targetTenant is allowed (including cross-tenant/all).
+//   - Otherwise (regular users and organization administrators, who are scoped to their own OrgID):
+//     - If identity.OrgID is empty, it returns a forbidden error.
+//     - If targetTenant is non-empty and does not match identity.OrgID, it returns a forbidden error.
+//     - If targetTenant is empty, it populates targetTenant with identity.OrgID.
+// If no identity is present in context (dev/unauthenticated mode), it returns nil.
 func enforceTenant(ctx context.Context, targetTenant *string) error {
 	id, ok := authn.IdentityFromContext(ctx)
-	if !ok || id.IsOrgAdmin {
+	if !ok {
 		return nil
+	}
+	if id.IsPlatformAdmin {
+		return nil
+	}
+	if id.OrgID == "" {
+		return fmt.Errorf("forbidden: identity has no organization")
 	}
 	if *targetTenant != "" && *targetTenant != id.OrgID {
 		return fmt.Errorf("forbidden: tenant mismatch")
