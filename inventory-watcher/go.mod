@@ -1,6 +1,6 @@
 module github.com/osac-project/cost-event-consumer
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/getkin/kin-openapi v0.142.0
