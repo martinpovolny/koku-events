@@ -450,9 +450,13 @@ func isBudgetUnit(unit string) bool {
 }
 
 // ApplyRate computes cost for a metered value using flat or tiered pricing.
-// Returns decimal.Decimal for billing-grade precision.
+// Returns decimal.Decimal for billing-grade precision. Negative values
+// (additive billing corrections) are priced symmetrically as negative cost.
 func ApplyRate(value float64, rate inventory.RateRecord) decimal.Decimal {
 	if len(rate.Tiers) > 0 {
+		if value < 0 {
+			return applyTieredRate(-value, rate.Tiers).Neg()
+		}
 		return applyTieredRate(value, rate.Tiers)
 	}
 	return decimal.NewFromFloat(value).Mul(rate.PricePerUnit)

@@ -243,3 +243,59 @@ func TestDiagnostics_ReconcileEntities(t *testing.T) {
 	}
 }
 
+func TestLoad_KafkaOSACReaderDefaultsAndTLSAutoEnable(t *testing.T) {
+	t.Setenv("KAFKA_READER_MODE", "osac-reader")
+	t.Setenv("KAFKA_MODE", "")
+	t.Setenv("KAFKA_TLS_ENABLED", "")
+	t.Setenv("KAFKA_TLS_CA_CERT", "/etc/kafka-ca/ca.crt")
+	t.Setenv("KAFKA_SASL_USERNAME", "cost-management-reader")
+	t.Setenv("KAFKA_SASL_PASSWORD_FILE", "/etc/kafka-auth/password")
+	t.Setenv("KAFKA_INCLUDE_INFERENCE", "true")
+
+	cfg := Load()
+	if cfg.KafkaReaderMode != "osac-reader" {
+		t.Errorf("KafkaReaderMode = %q, want osac-reader", cfg.KafkaReaderMode)
+	}
+	if cfg.KafkaMode != "consumer" {
+		t.Errorf("KafkaMode = %q, want consumer in osac-reader mode", cfg.KafkaMode)
+	}
+	if !cfg.KafkaTLSEnabled {
+		t.Error("expected KafkaTLSEnabled to auto-enable when CA cert or SASL username is set")
+	}
+	if cfg.KafkaHeartbeatPrefix != "osac.metering.heartbeat." {
+		t.Errorf("KafkaHeartbeatPrefix = %q, want osac.metering.heartbeat.", cfg.KafkaHeartbeatPrefix)
+	}
+	if !cfg.KafkaIncludeInference {
+		t.Error("expected KafkaIncludeInference = true")
+	}
+
+	diag := cfg.Diagnostics()
+	if !diag.KafkaTLSEnabled || !diag.KafkaTLSCACertSet || !diag.KafkaSASLConfigured {
+		t.Errorf("unexpected kafka diagnostics: %+v", diag)
+	}
+}
+
+func TestValidate_KafkaConfig(t *testing.T) {
+	base := Config{OSACBaseURL: "http://localhost", InventoryDBURL: "postgres://localhost/db"}
+
+	badMode := base
+	badMode.KafkaReaderMode = "invalid"
+	if err := badMode.Validate(); err == nil {
+		t.Error("expected invalid KAFKA_READER_MODE to fail validation")
+	}
+
+	missingPass := base
+	missingPass.KafkaBrokers = "broker:9093"
+	missingPass.KafkaReaderMode = "osac-reader"
+	missingPass.KafkaSASLUsername = "reader"
+	if err := missingPass.Validate(); err == nil {
+		t.Error("expected missing SASL password to fail validation")
+	}
+
+	validReader := missingPass
+	validReader.KafkaSASLPasswordFile = "/etc/kafka-auth/password"
+	if err := validReader.Validate(); err != nil {
+		t.Errorf("valid osac-reader config failed validation: %v", err)
+	}
+}
+

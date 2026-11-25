@@ -23,7 +23,8 @@ Optional goroutines are activated by env vars.
 |-----------|----------|---------|--------|
 | **watcher** | continuous | Consumes OSAC Watch stream (gRPC). Upserts inventory on VM/cluster/BM lifecycle events. | [`internal/watcher/watcher.go`](../inventory-watcher/internal/watcher/watcher.go) |
 | **reconciler** | 1h | Periodic List calls to OSAC to catch missed events (drift correction). | [`internal/reconciler/reconciler.go`](../inventory-watcher/internal/reconciler/reconciler.go) |
-| **ingest** | HTTP server | Accepts legacy CloudEvents and atomic OSAC adapter batches via `POST /api/v1/events/batch`. Serves report API, balance check, debug dashboard. | [`internal/api/handler.go`](../inventory-watcher/internal/api/handler.go) |
+| **ingest** | HTTP server | Accepts legacy CloudEvents, locked OSAC v1 usage events (`POST /api/v1/events`), and atomic OSAC adapter batches (`POST /api/v1/events/batch`). Serves report API, balance check, debug dashboard. | [`internal/api/handler.go`](../inventory-watcher/internal/api/handler.go) |
+| **kafka-consumer** | continuous | Optional Kafka consumer (`KAFKA_BROKERS`). Supports legacy 3-topic mode and `KAFKA_READER_MODE=osac-reader` (direct OSAC `metering.readers` reader with TLS, SCRAM-SHA-512, dynamic regex topic subscription, and durable `kafka_dead_letters`). | [`internal/kafka/consumer.go`](../inventory-watcher/internal/kafka/consumer.go) |
 | **metering** | 60s | Sweeps billable VMs/clusters/BM, produces time-based metering entries (uptime, CPU, memory). | [`internal/metering/metering.go`](../inventory-watcher/internal/metering/metering.go) |
 | **rating** | 30s | Picks up unrated metering entries, applies rates (flat or tiered), writes cost entries. | [`internal/rating/rating.go`](../inventory-watcher/internal/rating/rating.go) |
 | **splunk** | 10s | Forwards raw events to Splunk HEC (cursor-based). Opt-in via `SPLUNK_HEC_URL`. | [`internal/splunk/forwarder.go`](../inventory-watcher/internal/splunk/forwarder.go) |
@@ -61,7 +62,8 @@ entries. The balance check API compares metering usage against quotas.
 | Table | Go Model | Purpose |
 |---|---|---|
 | `raw_events` | [`RawEvent`](../inventory-watcher/internal/inventory/models.go) | Append-only audit log. Intentionally non-unique for ingest throughput; never used as the idempotency mechanism. |
-| `ingestion_receipts` | N/A (receipt identity in [`store.go`](../inventory-watcher/internal/inventory/store.go)) | Durable adapter delivery ledger. `(event_source, event_id)` is unique and binds to the canonical event SHA-256; exact replays are no-ops and collisions reject the whole batch. |
+| `ingestion_receipts` | N/A (receipt identity in [`store.go`](../inventory-watcher/internal/inventory/store.go)) | Durable delivery ledger. `(event_source, event_id)` is unique and binds to the canonical event SHA-256; exact replays are no-ops and collisions reject the whole batch. |
+| `kafka_dead_letters` | [`KafkaDeadLetter`](../inventory-watcher/internal/inventory/models.go) | Durable dead-letter store for Kafka records that fail with permanent errors (invalid JSON, contract validation, unsupported version, or receipt collision). Unique on `(topic, partition, record_offset)` so offset commits advance safely only after persistence. |
 | `inventory_tenant` | [`TenantRecord`](../inventory-watcher/internal/inventory/models.go) | OSAC tenants — top-level grouping for all resources. |
 | `inventory_project` | [`ProjectRecord`](../inventory-watcher/internal/inventory/models.go) | OSAC projects (Tenant → Project hierarchy). |
 | `inventory_compute_instance` | [`ComputeInstanceRecord`](../inventory-watcher/internal/inventory/models.go) | VMs tracked from OSAC. `last_metered_at` for duration-based metering. |

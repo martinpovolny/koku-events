@@ -23,6 +23,7 @@ import (
 	"github.com/osac-project/cost-event-consumer/internal/inventory"
 	"github.com/osac-project/cost-event-consumer/internal/metering"
 	"github.com/osac-project/cost-event-consumer/internal/metrics"
+	"github.com/osac-project/cost-event-consumer/internal/osacmetering"
 	"github.com/osac-project/cost-event-consumer/internal/rating"
 )
 
@@ -91,12 +92,28 @@ func NewAPIHandler(store *inventory.Store, meter *metering.Meter, cfg *config.Co
 
 // ProcessKafkaEvent implements kafka.EventProcessor. It decodes a CloudEvent
 // from Kafka and runs the same processing pipeline as the HTTP ingest handler.
+// Permanent errors (invalid JSON, schema/contract validation failures,
+// unsupported versions, receipt identity collisions) implement
+// kafka.PermanentError so the Kafka consumer routes them to kafka_dead_letters
+// instead of retrying forever. Transient errors (such as database failures)
+// remain plain errors so offsets stay uncommitted for redelivery.
 func (h *APIHandler) ProcessKafkaEvent(ctx context.Context, topic string, payload []byte) error {
 	var ce cloudEventInternal
 	if err := json.Unmarshal(payload, &ce); err != nil {
-		return fmt.Errorf("kafka: invalid CloudEvent JSON: %w", err)
+		return &eventValidationError{
+			reason:  "invalid_json",
+			message: fmt.Sprintf("kafka: invalid CloudEvent JSON: %v", err),
+			cause:   err,
+		}
 	}
 	if err := h.processEvents(ctx, []cloudEventInternal{ce}); err != nil {
+		if errors.Is(err, inventory.ErrReceiptCollision) {
+			return &eventValidationError{
+				reason:  "receipt_collision",
+				message: fmt.Sprintf("kafka: process CloudEvent: %v", err),
+				cause:   err,
+			}
+		}
 		return fmt.Errorf("kafka: process CloudEvent: %w", err)
 	}
 	return nil
@@ -191,18 +208,22 @@ type cloudEventInternal struct {
 
 // meteringData is the payload from the OSAC metering-service v1.
 type meteringData struct {
-	ResourceID        string          `json:"resource_id"`
-	ResourceType      string          `json:"resource_type"`
-	TenantID          string          `json:"tenant_id"`
-	ProjectID         *string         `json:"project_id"`
-	CatalogItemID     *string         `json:"catalog_item_id"`
-	TemplateID        *string         `json:"template_id"`
-	PreviousState     *string         `json:"previous_state"`
-	CurrentState      string          `json:"current_state"`
-	TransitionTime    string          `json:"transition_time"`
-	DurationSeconds   *float64        `json:"duration_seconds"`
-	BillingDimensions json.RawMessage `json:"billing_dimensions"`
-	SchemaVersion     string          `json:"schema_version"`
+	ResourceID               string          `json:"resource_id"`
+	ResourceType             string          `json:"resource_type"`
+	TenantID                 string          `json:"tenant_id"`
+	ExternalBillingAccountID *string         `json:"external_billing_account_id"`
+	ProjectID                *string         `json:"project_id"`
+	CatalogItemID            *string         `json:"catalog_item_id"`
+	TemplateID               *string         `json:"template_id"`
+	PreviousState            *string         `json:"previous_state"`
+	CurrentState             string          `json:"current_state"`
+	TransitionTime           string          `json:"transition_time"`
+	DurationSeconds          *float64        `json:"duration_seconds"`
+	Meter                    string          `json:"meter"`
+	Component                string          `json:"component"`
+	HeartbeatTime            string          `json:"heartbeat_time"`
+	BillingDimensions        json.RawMessage `json:"billing_dimensions"`
+	SchemaVersion            string          `json:"schema_version"`
 }
 
 // vmBillingDimensions holds compute_instance billing dimensions.
@@ -296,9 +317,20 @@ type eventBatch struct {
 	Events []cloudEventInternal `json:"events"`
 }
 
-type eventValidationError struct{ message string }
+type eventValidationError struct {
+	reason  string
+	message string
+	cause   error
+}
 
 func (e *eventValidationError) Error() string { return e.message }
+func (e *eventValidationError) Unwrap() error { return e.cause }
+func (e *eventValidationError) DeadLetterReason() string {
+	if e.reason != "" {
+		return e.reason
+	}
+	return "validation_error"
+}
 
 // IngestEvent accepts the legacy single-event form. It intentionally uses the
 // same receipt-protected processing path as batch delivery.
@@ -426,21 +458,60 @@ func (h *APIHandler) validateCloudEvent(ce cloudEventInternal) error {
 	if len(ce.Data) == 0 || string(ce.Data) == "null" {
 		return &eventValidationError{message: "event data is required"}
 	}
+	if osacmetering.IsUnsupportedOSACVersion(ce.Type) {
+		return &eventValidationError{
+			reason:  "unsupported_version",
+			message: fmt.Sprintf("unsupported OSAC metering CloudEvent version %q", ce.Type),
+		}
+	}
+
+	intervalHeartbeat := isOSACIntervalHeartbeat(ce)
 
 	now := time.Now().UTC()
 	age := now.Sub(ce.Time.UTC())
-	if age > maxEventAge {
+	if !intervalHeartbeat && age > maxEventAge {
 		metrics.EventsRejectedTotal.WithLabelValues("timestamp_too_old").Inc()
-		return &eventValidationError{message: fmt.Sprintf("event time is too old (%.0f minutes ago; max %s)", age.Minutes(), maxEventAge)}
+		return &eventValidationError{
+			reason:  "timestamp_rejected",
+			message: fmt.Sprintf("event time is too old (%.0f minutes ago; max %s)", age.Minutes(), maxEventAge),
+		}
 	}
 	if age < -maxEventFuture {
 		metrics.EventsRejectedTotal.WithLabelValues("timestamp_too_future").Inc()
-		return &eventValidationError{message: fmt.Sprintf("event time is too far in the future (%s; max %s)", (-age).Round(time.Second), maxEventFuture)}
+		return &eventValidationError{
+			reason:  "timestamp_rejected",
+			message: fmt.Sprintf("event time is too far in the future (%s; max %s)", (-age).Round(time.Second), maxEventFuture),
+		}
 	}
-	if age > warnEventDrift {
-		metrics.EventsTimestampDriftTotal.WithLabelValues("past").Inc()
-	} else if age < -warnEventDrift {
-		metrics.EventsTimestampDriftTotal.WithLabelValues("future").Inc()
+	if !intervalHeartbeat {
+		if age > warnEventDrift {
+			metrics.EventsTimestampDriftTotal.WithLabelValues("past").Inc()
+		} else if age < -warnEventDrift {
+			metrics.EventsTimestampDriftTotal.WithLabelValues("future").Inc()
+		}
+	}
+
+	if intervalHeartbeat || (ce.Type == eventTypeInferenceUsage && osacmetering.HasUsageObject(ce.Data)) {
+		if ce.OSACResourceID == "" || ce.OSACResourceType == "" || ce.OSACTenant == "" {
+			return &eventValidationError{message: "OSAC v1 event is missing required resource extensions"}
+		}
+		norm, err := osacmetering.TranslateEnvelope(toOSACInput(ce))
+		if err != nil {
+			reason := "validation_error"
+			var verErr *osacmetering.UnsupportedVersionError
+			if errors.As(err, &verErr) {
+				reason = "unsupported_version"
+			}
+			return &eventValidationError{reason: reason, message: err.Error(), cause: err}
+		}
+		if !norm.HeartbeatTime.IsZero() && now.Sub(norm.HeartbeatTime) < -maxEventFuture {
+			metrics.EventsRejectedTotal.WithLabelValues("timestamp_too_future").Inc()
+			return &eventValidationError{
+				reason:  "timestamp_rejected",
+				message: fmt.Sprintf("heartbeat_time is too far in the future (%s; max %s)", (-now.Sub(norm.HeartbeatTime)).Round(time.Second), maxEventFuture),
+			}
+		}
+		return nil
 	}
 
 	resourceType, resourceID, tenantID := classifyEvent(ce)
@@ -470,6 +541,41 @@ func (h *APIHandler) validateCloudEvent(ce cloudEventInternal) error {
 		}
 	}
 	return nil
+}
+
+func toOSACInput(ce cloudEventInternal) osacmetering.EnvelopeInput {
+	return osacmetering.EnvelopeInput{
+		SpecVersion:      ce.SpecVersion,
+		ID:               ce.ID,
+		Source:           ce.Source,
+		Type:             ce.Type,
+		DataContentType:  ce.DataContentType,
+		Time:             ce.Time,
+		Subject:          ce.Subject,
+		OSACResourceID:   ce.OSACResourceID,
+		OSACResourceType: ce.OSACResourceType,
+		OSACTenant:       ce.OSACTenant,
+		OSACProject:      ce.OSACProject,
+		Data:             ce.Data,
+	}
+}
+
+func isOSACIntervalHeartbeat(ce cloudEventInternal) bool {
+	if ce.Type != eventTypeResourceHeartbeat {
+		return false
+	}
+	if osacmetering.HasUsageObject(ce.Data) {
+		return true
+	}
+	var peek struct {
+		CurrentState  string `json:"current_state"`
+		Meter         string `json:"meter"`
+		HeartbeatTime string `json:"heartbeat_time"`
+	}
+	if err := json.Unmarshal(ce.Data, &peek); err != nil {
+		return true
+	}
+	return peek.Meter != "" || peek.HeartbeatTime != "" || peek.CurrentState == ""
 }
 
 func (h *APIHandler) processEvent(ctx context.Context, ce cloudEventInternal) error {
@@ -525,7 +631,18 @@ func classifyEvent(ce cloudEventInternal) (resourceType, resourceID, tenantID st
 		if rt == "" {
 			rt = ce.Type
 		}
-		return rt, ce.OSACResourceID, ce.OSACTenant
+		tenant := ce.OSACTenant
+		if ce.Type == eventTypeResourceHeartbeat || ce.Type == eventTypeInferenceUsage {
+			var acctPeek struct {
+				ExternalBillingAccountID *string `json:"external_billing_account_id"`
+			}
+			if err := json.Unmarshal(ce.Data, &acctPeek); err == nil && acctPeek.ExternalBillingAccountID != nil {
+				if acct := strings.TrimSpace(*acctPeek.ExternalBillingAccountID); acct != "" {
+					tenant = acct
+				}
+			}
+		}
+		return rt, ce.OSACResourceID, tenant
 	}
 
 	var peek struct {
@@ -732,11 +849,17 @@ func (h *APIHandler) processModelEvent(ctx context.Context, ce cloudEventInterna
 	return nil
 }
 
-// processOSACResourceEvent handles OSAC metering-service v1 lifecycle events.
-// These arrive on the osac.metering.lifecycle topic with resource state
-// transitions. For compute_instance resources, we upsert an inventory record
-// so that our existing metering sweep picks up the resource.
+// processOSACResourceEvent handles OSAC metering-service v1 events.
+// Canonical OSAC v1 interval usage heartbeats (osac.resource.heartbeat.v1 with
+// a usage object) are normalized through internal/osacmetering and persisted
+// directly as metering_entries (including negative correction intervals and all
+// 6 OSAC resource types). Legacy lifecycle state-transition events continue to
+// upsert inventory records for the local metering sweep.
 func (h *APIHandler) processOSACResourceEvent(ctx context.Context, ce cloudEventInternal) error {
+	if isOSACIntervalHeartbeat(ce) {
+		return h.processOSACIntervalUsage(ctx, ce)
+	}
+
 	var md meteringData
 	if err := json.Unmarshal(ce.Data, &md); err != nil {
 		return fmt.Errorf("osac v1: decode metering data: %w", err)
@@ -761,6 +884,31 @@ func (h *APIHandler) processOSACResourceEvent(ctx context.Context, ce cloudEvent
 		h.logger.Info("osac v1: unhandled resource type", "resource_type", md.ResourceType)
 		return nil
 	}
+}
+
+func (h *APIHandler) processOSACIntervalUsage(ctx context.Context, ce cloudEventInternal) error {
+	norm, err := osacmetering.TranslateEnvelope(toOSACInput(ce))
+	if err != nil {
+		return fmt.Errorf("osac v1: translate usage event: %w", err)
+	}
+	entry := norm.ToMeteringEntry()
+	if err := h.store.InsertMeteringEntryBatch(ctx, []inventory.MeteringEntry{entry}); err != nil {
+		return fmt.Errorf("osac v1: insert metering entry: %w", err)
+	}
+	metrics.MeteringEntriesCreated.WithLabelValues(entry.ResourceType, entry.MeterName).Inc()
+
+	h.logger.Info("osac v1: ingested interval usage",
+		"type", ce.Type,
+		"resource_type", entry.ResourceType,
+		"resource_id", entry.ResourceID,
+		"tenant_id", entry.TenantID,
+		"meter", entry.MeterName,
+		"value", entry.Value,
+		"unit", entry.Unit,
+		"period_start", entry.PeriodStart,
+		"period_end", entry.PeriodEnd,
+	)
+	return nil
 }
 
 func (h *APIHandler) processOSACComputeInstance(ctx context.Context, ce cloudEventInternal, md meteringData) error {
@@ -854,6 +1002,10 @@ func (h *APIHandler) processOSACInference(ctx context.Context, ce cloudEventInte
 		_ = json.Unmarshal(md.BillingDimensions, &bd)
 	}
 
+	if osacmetering.HasUsageObject(ce.Data) && bd.PromptTokens == 0 && bd.CompletionTokens == 0 {
+		return h.processOSACIntervalUsage(ctx, ce)
+	}
+
 	modelID := bd.Model
 	if modelID == "" {
 		modelID = md.ResourceID
@@ -867,6 +1019,11 @@ func (h *APIHandler) processOSACInference(ctx context.Context, ce cloudEventInte
 	}
 
 	tenantID := md.TenantID
+	if md.ExternalBillingAccountID != nil {
+		if acct := strings.TrimSpace(*md.ExternalBillingAccountID); acct != "" {
+			tenantID = acct
+		}
+	}
 	if tenantID == "" && bd.OrganizationID != "" {
 		tenantID = bd.OrganizationID
 	}

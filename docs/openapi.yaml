@@ -134,8 +134,10 @@ paths:
 
         | Event Type | Resource | Source |
         |------------|----------|--------|
-        | `osac.compute_instance.lifecycle` | VMaaS compute instance | OSAC metering collector |
-        | `osac.cluster.lifecycle` | CaaS cluster | OSAC metering collector |
+        | `osac.resource.heartbeat.v1` | All 6 OSAC metering resource types (interval usage & backdated corrections) | OSAC Cost Management adapter / metering-service |
+        | `osac.inference.usage.v1` | MaaS inference usage | OSAC Cost Management adapter / metering-service |
+        | `osac.compute_instance.lifecycle` | VMaaS compute instance (legacy) | OSAC metering collector |
+        | `osac.cluster.lifecycle` | CaaS cluster (legacy) | OSAC metering collector |
         | `osac.model.lifecycle` | MaaS model (legacy mock format) | MaaS simulator |
         | `inference.tokens.used` | MaaS model (IPP format) | IPP external-metering plugin |
         | *(custom)* | Config-driven | Custom metrics YAML |

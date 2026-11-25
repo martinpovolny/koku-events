@@ -303,3 +303,19 @@ type PipelineSummary struct {
 	LiveClusters    int `json:"live_clusters"`
 	LiveModels      int `json:"live_models"`
 }
+
+// KafkaDeadLetter records a Kafka message that failed processing with a
+// permanent error (malformed JSON, schema validation failure, unsupported
+// version, or receipt collision) so offsets can safely advance without
+// losing poison records.
+type KafkaDeadLetter struct {
+	ID           int64     `json:"id"`
+	Topic        string    `json:"topic"`
+	Partition    int32     `json:"partition"`
+	RecordOffset int64     `json:"record_offset"`
+	RecordKey    string    `json:"record_key"`
+	Payload      []byte    `json:"payload"`
+	Reason       string    `json:"reason"`
+	ErrorMessage string    `json:"error_message"`
+	FailedAt     time.Time `json:"failed_at"`
+}

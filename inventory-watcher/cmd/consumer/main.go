@@ -156,13 +156,27 @@ func main() {
 	if kafkaEnabled {
 		kafkaMode := cfg.KafkaMode
 		kafkaCfg = kafka.Config{
-			Brokers:         strings.Split(cfg.KafkaBrokers, ","),
-			ConsumerGroup:   cfg.KafkaConsumerGroup,
-			TopicPrefix:     cfg.KafkaTopicPrefix,
-			ProducerEnabled: kafkaMode == "both" || kafkaMode == "producer",
-			ConsumerEnabled: kafkaMode == "both" || kafkaMode == "consumer",
+			Brokers:          strings.Split(cfg.KafkaBrokers, ","),
+			ConsumerGroup:    cfg.KafkaConsumerGroup,
+			TopicPrefix:      cfg.KafkaTopicPrefix,
+			ProducerEnabled:  kafkaMode == "both" || kafkaMode == "producer",
+			ConsumerEnabled:  kafkaMode == "both" || kafkaMode == "consumer",
+			ReaderMode:       cfg.KafkaReaderMode,
+			HeartbeatPrefix:  cfg.KafkaHeartbeatPrefix,
+			IncludeInference: cfg.KafkaIncludeInference,
+			TLSEnabled:       cfg.KafkaTLSEnabled,
+			TLSCACert:        cfg.KafkaTLSCACert,
+			SASLUsername:     cfg.KafkaSASLUsername,
+			SASLPasswordFile: cfg.KafkaSASLPasswordFile,
+			SASLPassword:     cfg.KafkaSASLPassword,
 		}
-		logger.Info("kafka configured", "brokers", cfg.KafkaBrokers, "mode", kafkaMode)
+		logger.Info("kafka configured",
+			"brokers", cfg.KafkaBrokers,
+			"mode", kafkaMode,
+			"reader_mode", kafkaCfg.NormalizedReaderMode(),
+			"tls", kafkaCfg.TLSEnabled,
+			"sasl", kafkaCfg.SASLUsername != "",
+		)
 
 		if kafkaCfg.ProducerEnabled {
 			var err error
@@ -170,6 +184,7 @@ func main() {
 			if err != nil {
 				logger.Error("failed to create Kafka producer", "error", err)
 			} else {
+				defer kafkaProducer.Close()
 				// Kafka is an optional producer for the retained OSAC watcher path.
 				// HTTP and batch ingestion process directly and never publish here.
 				if w != nil {
@@ -215,12 +230,21 @@ func main() {
 
 	// Start Kafka consumer if configured (uses handler as event processor).
 	if kafkaEnabled && kafkaCfg.ConsumerEnabled {
-		kc, err := kafka.NewConsumer(kafkaCfg, h, logger)
+		kc, err := kafka.NewConsumer(kafkaCfg, h, logger, kafka.WithDeadLetterWriter(store))
 		if err != nil {
 			logger.Error("failed to create Kafka consumer", "error", err)
+			if kafkaCfg.NormalizedReaderMode() == kafka.ReaderModeOSACReader {
+				os.Exit(1)
+			}
 		} else {
-			startComponent("kafka-consumer", func() error { return kc.Run(ctx) })
-			logger.Info("kafka consumer enabled", "group", cfg.KafkaConsumerGroup)
+			startComponent("kafka-consumer", func() error {
+				defer kc.Close()
+				return kc.Run(ctx)
+			})
+			logger.Info("kafka consumer enabled",
+				"group", cfg.KafkaConsumerGroup,
+				"reader_mode", kafkaCfg.NormalizedReaderMode(),
+			)
 		}
 	}
 

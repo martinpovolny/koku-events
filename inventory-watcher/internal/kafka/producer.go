@@ -20,16 +20,20 @@ type Producer struct {
 
 // NewProducer creates a franz-go client configured for async producing.
 func NewProducer(cfg Config, logger *slog.Logger) (*Producer, error) {
-	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(cfg.Brokers...),
+	opts, err := cfg.BuildClientOptions()
+	if err != nil {
+		return nil, fmt.Errorf("kafka producer: %w", err)
+	}
+	opts = append(opts,
 		kgo.AllowAutoTopicCreation(),
 		kgo.DisableIdempotentWrite(),
 		kgo.ProducerBatchCompression(kgo.SnappyCompression()),
 	)
+	cl, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka producer: %w", err)
 	}
-	logger.Info("kafka producer created", "brokers", cfg.Brokers)
+	logger.Info("kafka producer created", "brokers", cleanBrokers(cfg.Brokers))
 	return &Producer{client: cl, cfg: cfg, logger: logger}, nil
 }
 

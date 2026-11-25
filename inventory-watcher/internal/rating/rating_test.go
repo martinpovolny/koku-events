@@ -397,3 +397,26 @@ func TestMatchRate_CatalogItemTakesPrecedenceOverMachineType(t *testing.T) {
 		t.Errorf("expected catalog-specific rate (ID=2), got %+v", r)
 	}
 }
+
+func TestApplyRate_NegativeCorrections(t *testing.T) {
+	flat := inventory.RateRecord{PricePerUnit: d(0.05)}
+	if got := ApplyRate(-60, flat); !got.Equal(d(-3.0)) {
+		t.Errorf("flat negative correction: got %v, want -3.0", got)
+	}
+
+	tiered := inventory.RateRecord{
+		Tiers: []inventory.Tier{
+			{UpTo: ptr(100), PricePerUnit: d(0.10)},
+			{UpTo: nil, PricePerUnit: d(0.05)},
+		},
+	}
+	// Cumulative correction: prior 150 (100*0.10 + 50*0.05 = 12.50), delta -40 -> total 110 (10.50) => -2.00
+	if got := ApplyRateCumulative(-40, 150, tiered); !got.Equal(d(-2.0)) {
+		t.Errorf("cumulative negative correction: got %v, want -2.0", got)
+	}
+
+	// Per-event tiered correction should mirror positive charge symmetrically (-50 => -5.00).
+	if got := ApplyRate(-50, tiered); !got.Equal(d(-5.0)) {
+		t.Errorf("per-event tiered negative correction: got %v, want -5.0", got)
+	}
+}

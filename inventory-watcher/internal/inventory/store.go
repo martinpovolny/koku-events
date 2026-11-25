@@ -451,6 +451,24 @@ CREATE TABLE IF NOT EXISTS ingestion_receipts (
     received_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (event_source, event_id)
 );
+
+-- Durable dead-letter table for Kafka records that fail with permanent errors
+-- (malformed JSON, schema/contract validation, unsupported version, or receipt
+-- identity collision). Unique on (topic, partition, record_offset) so redelivery
+-- before offset commit is idempotent.
+CREATE TABLE IF NOT EXISTS kafka_dead_letters (
+    id             BIGSERIAL PRIMARY KEY,
+    topic          TEXT NOT NULL,
+    partition      INTEGER NOT NULL,
+    record_offset  BIGINT NOT NULL,
+    record_key     TEXT NOT NULL DEFAULT '',
+    payload        BYTEA NOT NULL,
+    reason         TEXT NOT NULL,
+    error_message  TEXT NOT NULL,
+    failed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (topic, partition, record_offset)
+);
+CREATE INDEX IF NOT EXISTS idx_kdl_failed_at ON kafka_dead_letters (failed_at DESC);
 `
 
 // ErrReceiptCollision means a producer reused an event identity for different
@@ -2366,4 +2384,55 @@ func (s *Store) DeletePricingRule(ctx context.Context, name string) (bool, error
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// InsertKafkaDeadLetter durably records a Kafka message that encountered a
+// permanent processing failure. Duplicate inserts for the same
+// (topic, partition, record_offset) are ignored so redeliveries are idempotent.
+func (s *Store) InsertKafkaDeadLetter(ctx context.Context, dl KafkaDeadLetter) error {
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO kafka_dead_letters
+			(topic, partition, record_offset, record_key, payload, reason, error_message)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (topic, partition, record_offset) DO NOTHING
+	`, dl.Topic, dl.Partition, dl.RecordOffset, dl.RecordKey, dl.Payload, dl.Reason, dl.ErrorMessage)
+	if err != nil {
+		return fmt.Errorf("insert kafka dead letter %s[%d]@%d: %w", dl.Topic, dl.Partition, dl.RecordOffset, err)
+	}
+	return nil
+}
+
+// KafkaDeadLetterCount returns the total number of stored Kafka dead letters.
+func (s *Store) KafkaDeadLetterCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `SELECT count(*) FROM kafka_dead_letters`).Scan(&count)
+	return count, err
+}
+
+// ListKafkaDeadLetters returns the most recent dead-letter records up to limit.
+func (s *Store) ListKafkaDeadLetters(ctx context.Context, limit int) ([]KafkaDeadLetter, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT id, topic, partition, record_offset, record_key, payload, reason, error_message, failed_at
+		FROM kafka_dead_letters
+		ORDER BY failed_at DESC, id DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []KafkaDeadLetter
+	for rows.Next() {
+		var dl KafkaDeadLetter
+		if err := rows.Scan(&dl.ID, &dl.Topic, &dl.Partition, &dl.RecordOffset, &dl.RecordKey,
+			&dl.Payload, &dl.Reason, &dl.ErrorMessage, &dl.FailedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, dl)
+	}
+	return results, rows.Err()
 }
