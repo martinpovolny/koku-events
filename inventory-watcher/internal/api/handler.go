@@ -439,8 +439,17 @@ func (h *APIHandler) processEvents(ctx context.Context, events []cloudEventInter
 	return nil
 }
 
+func canonicalEventPayload(ce cloudEventInternal) ([]byte, error) {
+	if isOSACIntervalHeartbeat(ce) || (ce.Type == eventTypeInferenceUsage && osacmetering.HasUsageObject(ce.Data)) {
+		if norm, err := osacmetering.TranslateEnvelope(toOSACInput(ce)); err == nil {
+			return json.Marshal(norm.Envelope)
+		}
+	}
+	return json.Marshal(ce)
+}
+
 func cloudEventDigest(ce cloudEventInternal) (string, error) {
-	payload, err := json.Marshal(ce)
+	payload, err := canonicalEventPayload(ce)
 	if err != nil {
 		return "", err
 	}
@@ -586,7 +595,7 @@ func (h *APIHandler) processEvent(ctx context.Context, ce cloudEventInternal) er
 			resourceType, resourceID, tenantID = h.customMetrics.ClassifyEvent(ce.Type, dataMap)
 		}
 	}
-	fullJSON, err := json.Marshal(ce)
+	fullJSON, err := canonicalEventPayload(ce)
 	if err != nil {
 		return fmt.Errorf("marshal CloudEvent: %w", err)
 	}

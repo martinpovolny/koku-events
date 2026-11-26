@@ -137,3 +137,80 @@ func TestValidateCloudEvent_UnsupportedOSACVersionRejected(t *testing.T) {
 		t.Fatalf("expected unsupported_version validation error, got %T (%v)", err, err)
 	}
 }
+
+func TestCloudEventDigest_MatchesAcrossRawKafkaAndLockedAdapterPaths(t *testing.T) {
+	ts := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+	// Raw OSAC Kafka heartbeat (no schema_version, includes OSAC-internal fields).
+	rawKafka := cloudEventInternal{
+		SpecVersion: "1.0", ID: "hb-cutover-1", Source: "osac-metering", Type: eventTypeResourceHeartbeat,
+		DataContentType: "application/json", Time: ts,
+		OSACResourceID: "vm-1", OSACResourceType: "compute_instance", OSACTenant: "tenant-1", OSACProject: "proj-1",
+		Data: json.RawMessage(`{
+			"tenant_id": "tenant-1",
+			"external_billing_account_id": "acct-1",
+			"resource_type": "compute_instance",
+			"resource_id": "vm-1",
+			"meter": "compute",
+			"component": "compute",
+			"heartbeat_time": "2026-10-01T12:05:00Z",
+			"last_applied_offset": 42,
+			"rules_revision": "rev-7",
+			"billing_dimensions": {"project": "proj-1", "instance_type": "standard-4-8"},
+			"usage": {"semantics": "interval", "from": "2026-10-01T12:00:00Z", "to": "2026-10-01T12:05:00Z", "quantity": "300.000000", "unit": "seconds", "precision": "second"}
+		}`),
+	}
+
+	// Adapter-mapped locked HTTP CloudEventEnvelope (schema_version="v1", internal fields stripped).
+	lockedHTTP := cloudEventInternal{
+		SpecVersion: "1.0", ID: "hb-cutover-1", Source: "osac-metering", Type: eventTypeResourceHeartbeat,
+		DataContentType: "application/json", Time: ts,
+		OSACResourceID: "vm-1", OSACResourceType: "compute_instance", OSACTenant: "tenant-1", OSACProject: "proj-1",
+		Data: json.RawMessage(`{
+			"schema_version": "v1",
+			"tenant_id": "tenant-1",
+			"external_billing_account_id": "acct-1",
+			"project_id": "proj-1",
+			"resource_type": "compute_instance",
+			"resource_id": "vm-1",
+			"meter": "compute",
+			"component": "compute",
+			"heartbeat_time": "2026-10-01T12:05:00Z",
+			"usage": {"semantics": "interval", "from": "2026-10-01T12:00:00Z", "to": "2026-10-01T12:05:00Z", "quantity": "300.000000", "unit": "seconds", "precision": "second"},
+			"billing_dimensions": {"instance_type": "standard-4-8", "project": "proj-1"}
+		}`),
+	}
+
+	// Genuine collision: same identity, changed quantity.
+	collision := rawKafka
+	collision.Data = json.RawMessage(`{
+		"tenant_id": "tenant-1",
+		"external_billing_account_id": "acct-1",
+		"resource_type": "compute_instance",
+		"resource_id": "vm-1",
+		"meter": "compute",
+		"component": "compute",
+		"heartbeat_time": "2026-10-01T12:05:00Z",
+		"billing_dimensions": {"project": "proj-1", "instance_type": "standard-4-8"},
+		"usage": {"semantics": "interval", "from": "2026-10-01T12:00:00Z", "to": "2026-10-01T12:05:00Z", "quantity": "999.000000", "unit": "seconds", "precision": "second"}
+	}`)
+
+	dRaw, err := cloudEventDigest(rawKafka)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dLocked, err := cloudEventDigest(lockedHTTP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dCollision, err := cloudEventDigest(collision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dRaw != dLocked {
+		t.Fatalf("expected identical receipt digest across raw Kafka and locked HTTP paths: %s != %s", dRaw, dLocked)
+	}
+	if dRaw == dCollision {
+		t.Fatalf("expected different digest when usage quantity changed")
+	}
+}
