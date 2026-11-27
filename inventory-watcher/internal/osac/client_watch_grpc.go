@@ -13,8 +13,8 @@ import (
 	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
 	"github.com/jhump/protoreflect/grpcreflect"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	experimentalcredentials "google.golang.org/grpc/experimental/credentials"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -27,13 +27,12 @@ func (c *Client) WatchEvents(ctx context.Context, handler func(Event) error) err
 
 	if tlsCfg := c.TLSConfig(); tlsCfg != nil {
 		tlsCopy := tlsCfg.Clone()
-		// The OSAC gRPC server does not advertise h2 in ALPN (confirmed via
-		// openssl s_client: "No ALPN negotiated"). grpc-go ≥1.67 enforces
-		// ALPN by default, which breaks the connection. Setting NextProtos to
-		// nil lets the TLS handshake complete without ALPN negotiation while
-		// still using TLS for transport security.
+		// The OSAC gRPC server / OpenShift router does not advertise h2 in ALPN
+		// (confirmed via openssl s_client: "No ALPN negotiated"). grpc-go >= 1.67
+		// enforces ALPN in credentials.NewTLS, so match OSAC fulfillment-service's
+		// own client and use experimental/credentials.NewTLSWithALPNDisabled.
 		tlsCopy.NextProtos = nil
-		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCopy)))
+		opts = append(opts, grpc.WithTransportCredentials(experimentalcredentials.NewTLSWithALPNDisabled(tlsCopy)))
 	} else {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
