@@ -35,6 +35,14 @@ jobs:
 
       - name: Install k3s
         run: |
+          # Work around containerd/containerd#14485 on Ubuntu 26.04 runners:
+          # kernel.apparmor_restrict_unprivileged_unconfined=1 stacks //&unconfined
+          # onto cri-containerd.apparmor.d, causing k3s containerd's default
+          # AppArmor profile to deny intra-container signals (hanging postgres:18
+          # init and Go SIGURG). Remove once k3s bundles containerd with PR #14487.
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
+          fi
           curl -sfL https://get.k3s.io | sh -
           echo "Waiting for k3s..."
           for i in $(seq 1 60); do
