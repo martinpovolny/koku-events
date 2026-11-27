@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -106,6 +107,7 @@ func (h *APIHandler) ProcessKafkaEvent(ctx context.Context, topic string, payloa
 			cause:   err,
 		}
 	}
+	ce.rawPayload = append([]byte(nil), payload...)
 	if err := h.processEvents(ctx, []cloudEventInternal{ce}); err != nil {
 		if errors.Is(err, inventory.ErrReceiptCollision) {
 			return &eventValidationError{
@@ -204,6 +206,10 @@ type cloudEventInternal struct {
 	OSACTenant       string `json:"osactenant,omitempty"`
 	OSACProject      string `json:"osacproject,omitempty"`
 	OSACTrace        string `json:"osactrace,omitempty"`
+
+	// rawPayload holds the untouched incoming CloudEvent JSON bytes so
+	// raw_events preserves the original payload verbatim for auditability.
+	rawPayload json.RawMessage
 }
 
 // meteringData is the payload from the OSAC metering-service v1.
@@ -313,8 +319,8 @@ type maaSEventData struct {
 
 const maxBatchEvents = 100
 
-type eventBatch struct {
-	Events []cloudEventInternal `json:"events"`
+type rawEventBatch struct {
+	Events []json.RawMessage `json:"events"`
 }
 
 type eventValidationError struct {
@@ -332,14 +338,21 @@ func (e *eventValidationError) DeadLetterReason() string {
 	return "validation_error"
 }
 
-// IngestEvent accepts the legacy single-event form. It intentionally uses the
-// same receipt-protected processing path as batch delivery.
+// IngestEvent accepts the single-event form (both locked OSAC v1 envelopes and
+// legacy CloudEvents). It uses the same receipt-protected processing path as
+// batch delivery.
 func (h *APIHandler) IngestEvent(w http.ResponseWriter, r *http.Request) {
-	var ce cloudEventInternal
-	if err := decodeJSONBody(w, r, &ce); err != nil {
+	rawBody, err := readJSONBody(w, r)
+	if err != nil {
 		writeEventError(w, err)
 		return
 	}
+	var ce cloudEventInternal
+	if err := json.Unmarshal(rawBody, &ce); err != nil {
+		writeEventError(w, &eventValidationError{message: "invalid JSON: " + err.Error()})
+		return
+	}
+	ce.rawPayload = rawBody
 	if err := h.processEvents(r.Context(), []cloudEventInternal{ce}); err != nil {
 		writeEventError(w, err)
 		return
@@ -348,12 +361,11 @@ func (h *APIHandler) IngestEvent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// IngestEventBatch accepts the Cost Management adapter's durable delivery
-// unit. Every member is validated before transaction work begins; all receipt,
-// raw-event, inventory, and event-driven metering writes commit or roll back
-// together.
+// IngestEventBatch accepts an atomic batch of CloudEvents. Every member is
+// validated before transaction work begins; all receipt, raw-event, inventory,
+// and event-driven metering writes commit or roll back together.
 func (h *APIHandler) IngestEventBatch(w http.ResponseWriter, r *http.Request) {
-	var batch eventBatch
+	var batch rawEventBatch
 	if err := decodeJSONBody(w, r, &batch); err != nil {
 		writeEventError(w, err)
 		return
@@ -362,14 +374,37 @@ func (h *APIHandler) IngestEventBatch(w http.ResponseWriter, r *http.Request) {
 		writeEventError(w, &eventValidationError{message: fmt.Sprintf("events must contain between 1 and %d items", maxBatchEvents)})
 		return
 	}
-	if err := h.processEvents(r.Context(), batch.Events); err != nil {
+	events := make([]cloudEventInternal, len(batch.Events))
+	for i, rawItem := range batch.Events {
+		var ce cloudEventInternal
+		if err := json.Unmarshal(rawItem, &ce); err != nil {
+			writeEventError(w, &eventValidationError{message: fmt.Sprintf("invalid event JSON at index %d: %v", i, err)})
+			return
+		}
+		ce.rawPayload = rawItem
+		events[i] = ce
+	}
+	if err := h.processEvents(r.Context(), events); err != nil {
 		writeEventError(w, err)
 		return
 	}
-	for _, ce := range batch.Events {
+	for _, ce := range events {
 		metrics.EventsProcessedTotal.WithLabelValues(ce.Type, "accepted").Inc()
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func readJSONBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return nil, fmt.Errorf("request body exceeds %d bytes: %w", maxRequestBodySize, err)
+		}
+		return nil, &eventValidationError{message: "invalid JSON: " + err.Error()}
+	}
+	return body, nil
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, target interface{}) error {
@@ -611,13 +646,17 @@ func (h *APIHandler) processEvent(ctx context.Context, ce cloudEventInternal) er
 			resourceType, resourceID, tenantID = h.customMetrics.ClassifyEvent(ce.Type, dataMap)
 		}
 	}
-	fullJSON, err := canonicalEventPayload(ce)
-	if err != nil {
-		return fmt.Errorf("marshal CloudEvent: %w", err)
+	rawJSON := []byte(ce.rawPayload)
+	if len(rawJSON) == 0 {
+		var err error
+		rawJSON, err = json.Marshal(ce)
+		if err != nil {
+			return fmt.Errorf("marshal CloudEvent: %w", err)
+		}
 	}
 	if _, err := h.store.InsertRawEvent(ctx, inventory.RawEvent{
 		EventID: ce.ID, EventType: ce.Type, EventSource: ce.Source, EventTime: ce.Time,
-		TenantID: tenantID, ResourceType: resourceType, ResourceID: resourceID, Data: fullJSON,
+		TenantID: tenantID, ResourceType: resourceType, ResourceID: resourceID, Data: rawJSON,
 	}); err != nil {
 		return err
 	}

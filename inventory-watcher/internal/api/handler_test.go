@@ -2504,6 +2504,7 @@ func TestIngestEvent_OSACv1IntervalHeartbeatsAndNegativeCorrection(t *testing.T)
 		"osacresourceid": "%s",
 		"osacresourcetype": "volume",
 		"osactenant": "%s",
+		"osaccustomext": "preserve-me",
 		"data": {
 			"tenant_id": "%s",
 			"external_billing_account_id": "%s",
@@ -2530,6 +2531,28 @@ func TestIngestEvent_OSACv1IntervalHeartbeatsAndNegativeCorrection(t *testing.T)
 
 	if err := h.ProcessKafkaEvent(ctx, "osac.metering.heartbeat."+internalTenant, []byte(rawCorrection)); err != nil {
 		t.Fatalf("ProcessKafkaEvent raw correction failed: %v", err)
+	}
+
+	// Verify raw_events stores the untouched incoming JSON (no pre-storage conversion or stripping).
+	var storedRaw json.RawMessage
+	if err := testStore.Pool().QueryRow(ctx, `
+		SELECT data FROM raw_events WHERE event_id = $1
+	`, "hb-neg-"+suffix).Scan(&storedRaw); err != nil {
+		t.Fatalf("query raw_events: %v", err)
+	}
+	var rawObj map[string]interface{}
+	if err := json.Unmarshal(storedRaw, &rawObj); err != nil {
+		t.Fatalf("unmarshal stored raw_events.data: %v", err)
+	}
+	if rawObj["osaccustomext"] != "preserve-me" {
+		t.Fatalf("raw_events.data dropped top-level extension osaccustomext: %s", string(storedRaw))
+	}
+	rawData, _ := rawObj["data"].(map[string]interface{})
+	if rawData["last_applied_offset"] != float64(99) || rawData["rules_revision"] != "rev-2" {
+		t.Fatalf("raw_events.data did not preserve OSAC fields verbatim: %s", string(storedRaw))
+	}
+	if _, injected := rawData["schema_version"]; injected {
+		t.Fatalf("raw_events.data unexpectedly injected schema_version into raw Kafka event: %s", string(storedRaw))
 	}
 
 	// Verify both entries landed under external_billing_account_id and sum to 249.5.

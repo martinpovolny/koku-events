@@ -179,6 +179,115 @@ check_ge "Metering entries from Kafka event" 3 "$ME_COUNT"
 kill $CONSUMER_PID 2>/dev/null; wait $CONSUMER_PID 2>/dev/null || true
 echo "  Consumer stopped"
 
+# ──────────────────────────────────────────────────────────────────────
+# Test 3: Direct OSAC reader (KAFKA_READER_MODE=osac-reader)
+# ──────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Test 3: Direct OSAC reader (per-tenant regex, system/shared skip, DLQ) ---"
+
+for topic in osac.metering.heartbeat.tenant-ci osac.metering.heartbeat.system osac.metering.heartbeat.shared; do
+    $RPK topic delete "$topic" 2>/dev/null || true
+    $RPK topic create "$topic" 2>/dev/null
+done
+
+db_query "DELETE FROM metering_entries WHERE resource_id LIKE 'osac-reader-%';" > /dev/null 2>&1
+db_query "DELETE FROM raw_events WHERE event_id LIKE 'osac-reader-%';" > /dev/null 2>&1
+db_query "DELETE FROM ingestion_receipts WHERE event_id LIKE 'osac-reader-%';" > /dev/null 2>&1
+db_query "DELETE FROM kafka_dead_letters WHERE topic = 'osac.metering.heartbeat.tenant-ci';" > /dev/null 2>&1
+
+READER_SUFFIX="$(date +%s)"
+READER_RES_ID="osac-reader-vm-${READER_SUFFIX}"
+READER_POS_ID="osac-reader-pos-${READER_SUFFIX}"
+READER_V2_ID="osac-reader-v2-${READER_SUFFIX}"
+READER_NEG_ID="osac-reader-neg-${READER_SUFFIX}"
+READER_SYS_ID="osac-reader-sys-${READER_SUFFIX}"
+READER_SHD_ID="osac-reader-shd-${READER_SUFFIX}"
+READER_ACCT="billing-osac-reader"
+
+read -r R_NOW R_FROM R_TO R_BACK_FROM R_BACK_TO <<< "$(python3 -c '
+import datetime
+now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+frm = now - datetime.timedelta(minutes=5)
+back = now - datetime.timedelta(hours=48)
+back_to = back + datetime.timedelta(minutes=5)
+fmt = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")
+print(fmt(now), fmt(frm), fmt(now), fmt(back), fmt(back_to))
+')"
+
+echo "{\"specversion\":\"1.0\",\"id\":\"${READER_POS_ID}\",\"source\":\"osac-metering\",\"type\":\"osac.resource.heartbeat.v1\",\"datacontenttype\":\"application/json\",\"time\":\"${R_FROM}\",\"osacresourceid\":\"${READER_RES_ID}\",\"osacresourcetype\":\"compute_instance\",\"osactenant\":\"tenant-ci\",\"osaccustomext\":\"keep-raw\",\"data\":{\"tenant_id\":\"tenant-ci\",\"external_billing_account_id\":\"${READER_ACCT}\",\"project_id\":\"proj-ci\",\"resource_type\":\"compute_instance\",\"resource_id\":\"${READER_RES_ID}\",\"meter\":\"cpu_cores\",\"component\":\"compute\",\"heartbeat_time\":\"${R_NOW}\",\"last_applied_offset\":77,\"rules_revision\":\"rev-3\",\"billing_dimensions\":{\"instance_type\":\"standard-4-8\",\"project\":\"proj-ci\"},\"usage\":{\"semantics\":\"interval\",\"from\":\"${R_FROM}\",\"to\":\"${R_TO}\",\"quantity\":\"120.000000\",\"unit\":\"core_second\",\"precision\":\"second\"}}}" | \
+    $RPK topic produce osac.metering.heartbeat.tenant-ci 2>/dev/null
+
+echo "{\"specversion\":\"1.0\",\"id\":\"${READER_V2_ID}\",\"source\":\"osac-metering\",\"type\":\"osac.resource.heartbeat.v2\",\"datacontenttype\":\"application/json\",\"time\":\"${R_FROM}\",\"osacresourceid\":\"${READER_RES_ID}\",\"osacresourcetype\":\"compute_instance\",\"osactenant\":\"tenant-ci\",\"data\":{\"tenant_id\":\"tenant-ci\",\"resource_type\":\"compute_instance\",\"resource_id\":\"${READER_RES_ID}\"}}" | \
+    $RPK topic produce osac.metering.heartbeat.tenant-ci 2>/dev/null
+
+echo "{\"specversion\":\"1.0\",\"id\":\"${READER_NEG_ID}\",\"source\":\"osac-metering\",\"type\":\"osac.resource.heartbeat.v1\",\"datacontenttype\":\"application/json\",\"time\":\"${R_BACK_FROM}\",\"osacresourceid\":\"${READER_RES_ID}\",\"osacresourcetype\":\"compute_instance\",\"osactenant\":\"tenant-ci\",\"data\":{\"tenant_id\":\"tenant-ci\",\"external_billing_account_id\":\"${READER_ACCT}\",\"project_id\":\"proj-ci\",\"resource_type\":\"compute_instance\",\"resource_id\":\"${READER_RES_ID}\",\"meter\":\"cpu_cores\",\"component\":\"compute\",\"heartbeat_time\":\"${R_NOW}\",\"last_applied_offset\":78,\"rules_revision\":\"rev-3\",\"billing_dimensions\":{\"instance_type\":\"standard-4-8\",\"project\":\"proj-ci\"},\"usage\":{\"semantics\":\"interval\",\"from\":\"${R_BACK_FROM}\",\"to\":\"${R_BACK_TO}\",\"quantity\":\"-20.500000\",\"unit\":\"core_second\",\"precision\":\"second\"}}}" | \
+    $RPK topic produce osac.metering.heartbeat.tenant-ci 2>/dev/null
+
+echo "{\"specversion\":\"1.0\",\"id\":\"${READER_SYS_ID}\",\"source\":\"osac-metering\",\"type\":\"osac.resource.heartbeat.v1\",\"datacontenttype\":\"application/json\",\"time\":\"${R_FROM}\",\"osacresourceid\":\"osac-reader-sys-vm\",\"osacresourcetype\":\"compute_instance\",\"osactenant\":\"system\",\"data\":{\"tenant_id\":\"system\",\"resource_type\":\"compute_instance\",\"resource_id\":\"osac-reader-sys-vm\",\"meter\":\"cpu_cores\",\"component\":\"compute\",\"heartbeat_time\":\"${R_NOW}\",\"usage\":{\"semantics\":\"interval\",\"from\":\"${R_FROM}\",\"to\":\"${R_TO}\",\"quantity\":\"60.000000\",\"unit\":\"core_second\",\"precision\":\"second\"}}}" | \
+    $RPK topic produce osac.metering.heartbeat.system 2>/dev/null
+
+echo "{\"specversion\":\"1.0\",\"id\":\"${READER_SHD_ID}\",\"source\":\"osac-metering\",\"type\":\"osac.resource.heartbeat.v1\",\"datacontenttype\":\"application/json\",\"time\":\"${R_FROM}\",\"osacresourceid\":\"osac-reader-shd-vm\",\"osacresourcetype\":\"compute_instance\",\"osactenant\":\"shared\",\"data\":{\"tenant_id\":\"shared\",\"resource_type\":\"compute_instance\",\"resource_id\":\"osac-reader-shd-vm\",\"meter\":\"cpu_cores\",\"component\":\"compute\",\"heartbeat_time\":\"${R_NOW}\",\"usage\":{\"semantics\":\"interval\",\"from\":\"${R_FROM}\",\"to\":\"${R_TO}\",\"quantity\":\"60.000000\",\"unit\":\"core_second\",\"precision\":\"second\"}}}" | \
+    $RPK topic produce osac.metering.heartbeat.shared 2>/dev/null
+echo "  OSAC heartbeat records produced (tenant-ci + system + shared + v2 poison)"
+
+KAFKA_BROKERS="$BROKER" \
+KAFKA_READER_MODE="osac-reader" \
+KAFKA_TLS_ENABLED="false" \
+KAFKA_CONSUMER_GROUP="test-osac-reader-${READER_SUFFIX}" \
+INVENTORY_DB_URL="postgres://user:pass@localhost:5434/$DB_NAME" \
+INGEST_LISTEN_ADDR="localhost:18025" \
+METRICS_PORT="19005" \
+DISABLE_COMPONENTS="watcher,reconciler,metering" \
+"$WATCHER_BIN" > /tmp/kafka-osac-reader-test.log 2>&1 &
+READER_PID=$!
+
+for i in $(seq 1 30); do
+    curl -sf http://localhost:18025/healthz > /dev/null 2>&1 && break
+    sleep 1
+done
+if ! kill -0 $READER_PID 2>/dev/null; then
+    echo "ERROR: osac-reader process died"
+    tail -30 /tmp/kafka-osac-reader-test.log
+    exit 1
+fi
+echo "  osac-reader started (PID $READER_PID)"
+
+for i in $(seq 1 25); do
+    GOT_ME=$(db_query "SELECT count(*) FROM metering_entries WHERE resource_id = '${READER_RES_ID}';")
+    GOT_DLQ=$(db_query "SELECT count(*) FROM kafka_dead_letters WHERE topic = 'osac.metering.heartbeat.tenant-ci';")
+    if [ "$GOT_ME" = "2" ] && [ "$GOT_DLQ" = "1" ]; then
+        break
+    fi
+    sleep 1
+done
+
+READER_RAW_COUNT=$(db_query "SELECT count(*) FROM raw_events WHERE event_id IN ('${READER_POS_ID}', '${READER_NEG_ID}');")
+check "osac-reader stored both valid raw events" "2" "$READER_RAW_COUNT"
+
+RAW_OFFSET_PRESERVED=$(db_query "SELECT data->'data'->>'last_applied_offset' FROM raw_events WHERE event_id = '${READER_POS_ID}';")
+check "raw_events preserved raw OSAC last_applied_offset" "77" "$RAW_OFFSET_PRESERVED"
+
+RAW_EXT_PRESERVED=$(db_query "SELECT data->>'osaccustomext' FROM raw_events WHERE event_id = '${READER_POS_ID}';")
+check "raw_events preserved top-level extension verbatim" "keep-raw" "$RAW_EXT_PRESERVED"
+
+RAW_NO_SCHEMA_INJECT=$(db_query "SELECT (data->'data' ? 'schema_version')::text FROM raw_events WHERE event_id = '${READER_POS_ID}';")
+check "raw_events did not inject schema_version into raw Kafka event" "false" "$RAW_NO_SCHEMA_INJECT"
+
+READER_ME_SUMMARY=$(db_query "SELECT count(*) || ':' || round(COALESCE(SUM(value), 0), 1) FROM metering_entries WHERE resource_id = '${READER_RES_ID}' AND tenant_id = '${READER_ACCT}' AND meter_name = 'cpu_cores';")
+check "osac-reader interval + negative correction net metering" "2:99.5" "$READER_ME_SUMMARY"
+
+BUILTIN_SKIPPED=$(db_query "SELECT count(*) FROM raw_events WHERE event_id IN ('${READER_SYS_ID}', '${READER_SHD_ID}');")
+check "system and shared heartbeat topics ignored" "0" "$BUILTIN_SKIPPED"
+
+DLQ_COUNT=$(db_query "SELECT count(*) FROM kafka_dead_letters WHERE topic = 'osac.metering.heartbeat.tenant-ci' AND error_reason = 'unsupported_version';")
+check "unsupported v2 event persisted to kafka_dead_letters" "1" "$DLQ_COUNT"
+
+DLQ_METRIC=$(curl -sf http://localhost:19005/metrics 2>/dev/null | grep -c 'cost_consumer_kafka_dead_letters_total{reason="unsupported_version",topic="osac.metering.heartbeat.tenant-ci"} 1' || true)
+check "dead-letter Prometheus metric incremented" "1" "$DLQ_METRIC"
+
+kill $READER_PID 2>/dev/null; wait $READER_PID 2>/dev/null || true
+echo "  osac-reader stopped"
+
 # ── Summary ──
 echo ""
 echo "=========================================="
@@ -188,6 +297,7 @@ if [ "$FAIL" -gt 0 ]; then
     echo -e "  ${RED}$FAIL FAILED${NC}"
     echo "  API producer-path log: /tmp/kafka-producer-test.log"
     echo "  Consumer log: /tmp/kafka-consumer-test.log"
+    echo "  osac-reader log: /tmp/kafka-osac-reader-test.log"
     exit 1
 else
     echo -e "  ${GREEN}ALL PASSED${NC}"

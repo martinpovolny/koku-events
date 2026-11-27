@@ -6,8 +6,11 @@ on:
     paths:
       - 'inventory-watcher/internal/api/handler.go'
       - 'inventory-watcher/internal/kafka/**'
+      - 'inventory-watcher/internal/osacmetering/**'
+      - 'inventory-watcher/internal/inventory/**'
       - 'inventory-watcher/cmd/consumer/main.go'
       - 'integration-test/test-osac-kafka.sh'
+      - 'integration-test/test-osac-metering-paths.sh'
       - 'snippets/osac-create-vm.sh'
       - '.github/workflows/osac-kafka-integration.yml'
   pull_request:
@@ -15,8 +18,11 @@ on:
     paths:
       - 'inventory-watcher/internal/api/handler.go'
       - 'inventory-watcher/internal/kafka/**'
+      - 'inventory-watcher/internal/osacmetering/**'
+      - 'inventory-watcher/internal/inventory/**'
       - 'inventory-watcher/cmd/consumer/main.go'
       - 'integration-test/test-osac-kafka.sh'
+      - 'integration-test/test-osac-metering-paths.sh'
       - 'snippets/osac-create-vm.sh'
       - '.github/workflows/osac-kafka-integration.yml'
   workflow_dispatch:
@@ -35,6 +41,10 @@ permissions:
 env:
   OSAC_METERING_REPO: https://github.com/martinpovolny/osac.git
   OSAC_METERING_TAG: metering-v0.0.82-compat
+  # Temporary fork ref for osac-project/osac#2661 (cost-management-adapter).
+  # Switch to https://github.com/osac-project/osac.git @ main once #2661 merges.
+  OSAC_ADAPTER_REPO: https://github.com/martinpovolny/osac.git
+  OSAC_ADAPTER_REF: feat/cost-management-adapter-v2
 
 jobs:
   osac-kafka:
@@ -260,6 +270,104 @@ jobs:
           echo ""
           echo "=== Cost consumer ==="
           tail -30 /tmp/cost-consumer-osac.log || true
+          echo ""
+          echo "=== Kafka ==="
+          docker logs kafka --tail 30 || true
+
+  osac-metering-paths:
+    name: OSAC Adapter (Path 1) & Direct Reader (Path 2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: pass
+          POSTGRES_DB: costdb
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd="pg_isready -U user -d costdb"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: inventory-watcher/go.mod
+          cache: false
+
+      - name: Clone and build OSAC cost-management-adapter
+        run: |
+          git clone --depth 1 --branch "$OSAC_ADAPTER_REF" "$OSAC_ADAPTER_REPO" /tmp/osac-adapter
+          cd /tmp/osac-adapter/osac-metering/adapters
+          echo "cost-management-adapter at $(git rev-parse --short HEAD)"
+          GOTOOLCHAIN=auto go build -o /tmp/cost-management-adapter-bin ./cmd/cost-management-adapter/
+
+      - name: Build cost consumer
+        run: |
+          cd inventory-watcher
+          GOTOOLCHAIN=auto go build -o inventory-watcher ./cmd/consumer/
+
+      - name: Start Kafka (KRaft single-node)
+        run: |
+          docker run -d --name kafka --network host \
+            -e KAFKA_NODE_ID=1 \
+            -e KAFKA_PROCESS_ROLES=broker,controller \
+            -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093 \
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:19092 \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@127.0.0.1:9093 \
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+            -e CLUSTER_ID=osac-paths-ci-test-001 \
+            apache/kafka:latest
+
+      - name: Wait for Kafka and create topics
+        run: |
+          for i in $(seq 1 60); do
+            docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server 127.0.0.1:19092 --list 2>/dev/null && break || sleep 2
+          done
+          for topic in \
+            osac.metering.heartbeat.tenant-e2e \
+            osac.metering.heartbeat.system \
+            osac.metering.heartbeat.shared \
+            osac.metering.dlq.tenant-e2e \
+            osac.metering.inference \
+            osac.metering.inference.dlq; do
+            docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server 127.0.0.1:19092 \
+              --create --topic "$topic" --partitions 1 --replication-factor 1
+          done
+          echo "Kafka ready, topics created"
+
+      - name: Create isolated test databases
+        run: |
+          PGPASSWORD=pass psql -h 127.0.0.1 -p 5434 -U user -d costdb -c "CREATE DATABASE costdb_adapter;"
+          PGPASSWORD=pass psql -h 127.0.0.1 -p 5434 -U user -d costdb -c "CREATE DATABASE costdb_direct;"
+
+      - name: Run Path 1 & Path 2 integration tests
+        run: bash integration-test/test-osac-metering-paths.sh
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "=== Path 1 consumer ==="
+          cat /tmp/path1-consumer.log || true
+          echo ""
+          echo "=== Path 1 adapter ==="
+          cat /tmp/path1-adapter.log || true
+          echo ""
+          echo "=== Path 2 direct reader ==="
+          cat /tmp/path2-reader.log || true
           echo ""
           echo "=== Kafka ==="
           docker logs kafka --tail 30 || true

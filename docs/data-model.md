@@ -61,7 +61,7 @@ entries. The balance check API compares metering usage against quotas.
 
 | Table | Go Model | Purpose |
 |---|---|---|
-| `raw_events` | [`RawEvent`](../inventory-watcher/internal/inventory/models.go) | Append-only audit log. Intentionally non-unique for ingest throughput; never used as the idempotency mechanism. |
+| `raw_events` | [`RawEvent`](../inventory-watcher/internal/inventory/models.go) | Append-only audit log preserving untouched incoming CloudEvent JSON verbatim (no pre-storage contract conversion). Intentionally non-unique for ingest throughput; never used as the idempotency mechanism. |
 | `ingestion_receipts` | N/A (receipt identity in [`store.go`](../inventory-watcher/internal/inventory/store.go)) | Durable delivery ledger. `(event_source, event_id)` is unique and binds to the canonical event SHA-256; exact replays are no-ops and collisions reject the whole batch. |
 | `kafka_dead_letters` | [`KafkaDeadLetter`](../inventory-watcher/internal/inventory/models.go) | Durable dead-letter store for Kafka records that fail with permanent errors (invalid JSON, contract validation, unsupported version, or receipt collision). Unique on `(topic, partition, record_offset)` so offset commits advance safely only after persistence. |
 | `inventory_tenant` | [`TenantRecord`](../inventory-watcher/internal/inventory/models.go) | OSAC tenants — top-level grouping for all resources. |
