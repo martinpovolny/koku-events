@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'inventory-watcher/internal/kafka/**'
+      - 'inventory-watcher/internal/osacmetering/**'
+      - 'inventory-watcher/internal/inventory/**'
       - 'inventory-watcher/internal/api/handler.go'
       - 'inventory-watcher/internal/watcher/watcher.go'
       - 'inventory-watcher/cmd/consumer/main.go'
@@ -15,6 +17,8 @@ on:
     branches: [main]
     paths:
       - 'inventory-watcher/internal/kafka/**'
+      - 'inventory-watcher/internal/osacmetering/**'
+      - 'inventory-watcher/internal/inventory/**'
       - 'inventory-watcher/internal/api/handler.go'
       - 'inventory-watcher/internal/watcher/watcher.go'
       - 'inventory-watcher/cmd/consumer/main.go'
@@ -91,6 +95,9 @@ jobs:
           echo ""
           echo "=== Consumer log ==="
           cat /tmp/kafka-consumer-test.log || true
+          echo ""
+          echo "=== osac-reader log ==="
+          cat /tmp/kafka-osac-reader-test.log || true
           echo ""
           echo "=== Redpanda log ==="
           docker logs redpanda --tail 30 || true

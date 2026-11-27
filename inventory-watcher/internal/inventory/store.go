@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -451,6 +453,39 @@ CREATE TABLE IF NOT EXISTS ingestion_receipts (
     received_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (event_source, event_id)
 );
+
+-- Durable dead-letter table for Kafka records that fail with permanent errors
+-- (malformed JSON, schema/contract validation, unsupported version, or receipt
+-- identity collision). Unique on (topic, partition, record_offset) so redelivery
+-- before offset commit is idempotent.
+CREATE TABLE IF NOT EXISTS kafka_dead_letters (
+    id             BIGSERIAL PRIMARY KEY,
+    topic          TEXT NOT NULL,
+    partition      INTEGER NOT NULL,
+    record_offset  BIGINT NOT NULL,
+    record_key     BYTEA NOT NULL DEFAULT ''::bytea,
+    payload        BYTEA NOT NULL,
+    reason         TEXT NOT NULL,
+    error_message  TEXT NOT NULL,
+    failed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (topic, partition, record_offset)
+);
+-- Migrate earlier TEXT record_key columns to BYTEA so arbitrary binary Kafka
+-- keys (including NUL bytes) never fail dead-letter insertion.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'kafka_dead_letters'
+          AND column_name = 'record_key' AND data_type = 'text'
+    ) THEN
+        ALTER TABLE kafka_dead_letters
+            ALTER COLUMN record_key DROP DEFAULT,
+            ALTER COLUMN record_key TYPE BYTEA USING convert_to(record_key, 'UTF8'),
+            ALTER COLUMN record_key SET DEFAULT ''::bytea;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_kdl_failed_at ON kafka_dead_letters (failed_at DESC);
 `
 
 // ErrReceiptCollision means a producer reused an event identity for different
@@ -460,8 +495,10 @@ var ErrReceiptCollision = errors.New("ingestion receipt identity collision")
 // ClaimIngestionReceipt claims a source/id pair for one canonical CloudEvent.
 // It must run in the same transaction as the event side effects. A true return
 // value means the caller owns a newly inserted receipt; false means a verified
-// exact replay and the caller must not process the event again.
-func (s *Store) ClaimIngestionReceipt(ctx context.Context, source, id, digest string) (bool, error) {
+// exact replay and the caller must not process the event again. Optional
+// compatDigests allow exact replays to match receipts written under an earlier
+// digest format (such as pre-canonicalization OSAC heartbeat receipts).
+func (s *Store) ClaimIngestionReceipt(ctx context.Context, source, id, digest string, compatDigests ...string) (bool, error) {
 	tag, err := s.db.Exec(ctx, `
 		INSERT INTO ingestion_receipts (event_source, event_id, payload_sha256)
 		VALUES ($1, $2, $3)
@@ -481,7 +518,7 @@ func (s *Store) ClaimIngestionReceipt(ctx context.Context, source, id, digest st
 	`, source, id).Scan(&existingDigest); err != nil {
 		return false, fmt.Errorf("read existing receipt %s/%s: %w", source, id, err)
 	}
-	if existingDigest != digest {
+	if existingDigest != digest && !slices.Contains(compatDigests, existingDigest) {
 		return false, fmt.Errorf("%w: %s/%s", ErrReceiptCollision, source, id)
 	}
 	return false, nil
@@ -2366,4 +2403,67 @@ func (s *Store) DeletePricingRule(ctx context.Context, name string) (bool, error
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// InsertKafkaDeadLetter durably records a Kafka message that encountered a
+// permanent processing failure. Duplicate inserts for the same
+// (topic, partition, record_offset) are ignored so redeliveries are idempotent.
+// Nil keys/payloads (e.g. Kafka tombstones) are normalized to non-nil empty
+// byte slices so NOT NULL BYTEA constraints are always satisfied, and NUL bytes
+// in error messages are escaped for PostgreSQL TEXT compatibility.
+func (s *Store) InsertKafkaDeadLetter(ctx context.Context, dl KafkaDeadLetter) error {
+	recordKey := dl.RecordKey
+	if recordKey == nil {
+		recordKey = []byte{}
+	}
+	payload := dl.Payload
+	if payload == nil {
+		payload = []byte{}
+	}
+	errMsg := strings.ReplaceAll(dl.ErrorMessage, "\x00", "\\x00")
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO kafka_dead_letters
+			(topic, partition, record_offset, record_key, payload, reason, error_message)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (topic, partition, record_offset) DO NOTHING
+	`, dl.Topic, dl.Partition, dl.RecordOffset, recordKey, payload, dl.Reason, errMsg)
+	if err != nil {
+		return fmt.Errorf("insert kafka dead letter %s[%d]@%d: %w", dl.Topic, dl.Partition, dl.RecordOffset, err)
+	}
+	return nil
+}
+
+// KafkaDeadLetterCount returns the total number of stored Kafka dead letters.
+func (s *Store) KafkaDeadLetterCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `SELECT count(*) FROM kafka_dead_letters`).Scan(&count)
+	return count, err
+}
+
+// ListKafkaDeadLetters returns the most recent dead-letter records up to limit.
+func (s *Store) ListKafkaDeadLetters(ctx context.Context, limit int) ([]KafkaDeadLetter, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT id, topic, partition, record_offset, record_key, payload, reason, error_message, failed_at
+		FROM kafka_dead_letters
+		ORDER BY failed_at DESC, id DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []KafkaDeadLetter
+	for rows.Next() {
+		var dl KafkaDeadLetter
+		if err := rows.Scan(&dl.ID, &dl.Topic, &dl.Partition, &dl.RecordOffset, &dl.RecordKey,
+			&dl.Payload, &dl.Reason, &dl.ErrorMessage, &dl.FailedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, dl)
+	}
+	return results, rows.Err()
 }

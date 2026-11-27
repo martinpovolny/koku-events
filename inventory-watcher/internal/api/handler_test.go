@@ -3,7 +3,9 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -2413,6 +2415,397 @@ func TestIngestEventBatchMalformedMemberRollsBackAllMembers(t *testing.T) {
 	}
 	if rawCount != 0 || receiptCount != 0 {
 		t.Fatalf("malformed batch wrote valid member: raw=%d receipts=%d", rawCount, receiptCount)
+	}
+}
+
+func TestIngestEvent_OSACv1IntervalHeartbeatsAndNegativeCorrection(t *testing.T) {
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	now := time.Now().UTC().Truncate(time.Second)
+	from := now.Add(-48 * time.Hour) // backdated invoiced-period correction
+	to := from.Add(5 * time.Minute)
+
+	resourceID := "vol-hb-" + suffix
+	billingAcct := "billing-acct-" + suffix
+	internalTenant := "internal-tenant-" + suffix
+
+	postSingle := func(event map[string]interface{}) *http.Response {
+		t.Helper()
+		body, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		resp, err := http.Post(testServer.URL+"/api/v1/events", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("post event: %v", err)
+		}
+		return resp
+	}
+
+	// 1. Locked adapter envelope (positive interval usage) via POST /api/v1/events.
+	positive := map[string]interface{}{
+		"specversion":      "1.0",
+		"id":               "hb-pos-" + suffix,
+		"source":           "osac-metering",
+		"type":             "osac.resource.heartbeat.v1",
+		"datacontenttype":  "application/json",
+		"time":             from.Format(time.RFC3339),
+		"osacresourceid":   resourceID,
+		"osacresourcetype": "volume",
+		"osactenant":       internalTenant,
+		"osacproject":      "proj-" + suffix,
+		"data": map[string]interface{}{
+			"schema_version":              "v1",
+			"tenant_id":                   internalTenant,
+			"external_billing_account_id": billingAcct,
+			"project_id":                  "proj-" + suffix,
+			"resource_type":               "volume",
+			"resource_id":                 resourceID,
+			"meter":                       "capacity",
+			"component":                   "volume",
+			"heartbeat_time":              now.Format(time.RFC3339),
+			"usage": map[string]interface{}{
+				"semantics": "interval",
+				"from":      from.Format(time.RFC3339),
+				"to":        to.Format(time.RFC3339),
+				"quantity":  "300.000000",
+				"unit":      "gibibyte_second",
+				"precision": "second",
+			},
+			"billing_dimensions": map[string]interface{}{
+				"project": "proj-" + suffix,
+				"catalog": "cat-gp3",
+			},
+		},
+	}
+
+	resp := postSingle(positive)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("positive heartbeat: want 204, got %d", resp.StatusCode)
+	}
+
+	// 2. Exact replay must be an idempotent 204 no-op.
+	replay := postSingle(positive)
+	replay.Body.Close()
+	if replay.StatusCode != http.StatusNoContent {
+		t.Fatalf("replay heartbeat: want 204, got %d", replay.StatusCode)
+	}
+
+	// 3. Raw OSAC Kafka heartbeat with negative correction & internal fields.
+	h := api.NewAPIHandler(testStore, testMeter, nil, nil, testLogger)
+	rawCorrection := fmt.Sprintf(`{
+		"specversion": "1.0",
+		"id": "hb-neg-%s",
+		"source": "osac-metering",
+		"type": "osac.resource.heartbeat.v1",
+		"datacontenttype": "application/json",
+		"time": "%s",
+		"osacresourceid": "%s",
+		"osacresourcetype": "volume",
+		"osactenant": "%s",
+		"osaccustomext": "preserve-me",
+		"data": {
+			"tenant_id": "%s",
+			"external_billing_account_id": "%s",
+			"resource_type": "volume",
+			"resource_id": "%s",
+			"meter": "capacity",
+			"component": "volume",
+			"heartbeat_time": "%s",
+			"last_applied_offset": 99,
+			"rules_revision": "rev-2",
+			"billing_dimensions": {"project": "proj-%s", "catalog": "cat-gp3"},
+			"usage": {
+				"semantics": "interval",
+				"from": "%s",
+				"to": "%s",
+				"quantity": "-50.500000",
+				"unit": "gibibyte_second",
+				"precision": "second"
+			}
+		}
+	}`, suffix, from.Format(time.RFC3339), resourceID, internalTenant,
+		internalTenant, billingAcct, resourceID, now.Format(time.RFC3339), suffix,
+		from.Format(time.RFC3339), to.Format(time.RFC3339))
+
+	if err := h.ProcessKafkaEvent(ctx, "osac.metering.heartbeat."+internalTenant, []byte(rawCorrection)); err != nil {
+		t.Fatalf("ProcessKafkaEvent raw correction failed: %v", err)
+	}
+
+	// Verify raw_events stores the untouched incoming JSON (no pre-storage conversion or stripping).
+	var storedRaw json.RawMessage
+	if err := testStore.Pool().QueryRow(ctx, `
+		SELECT data FROM raw_events WHERE event_id = $1
+	`, "hb-neg-"+suffix).Scan(&storedRaw); err != nil {
+		t.Fatalf("query raw_events: %v", err)
+	}
+	var rawObj map[string]interface{}
+	if err := json.Unmarshal(storedRaw, &rawObj); err != nil {
+		t.Fatalf("unmarshal stored raw_events.data: %v", err)
+	}
+	if rawObj["osaccustomext"] != "preserve-me" {
+		t.Fatalf("raw_events.data dropped top-level extension osaccustomext: %s", string(storedRaw))
+	}
+	rawData, _ := rawObj["data"].(map[string]interface{})
+	if rawData["last_applied_offset"] != float64(99) || rawData["rules_revision"] != "rev-2" {
+		t.Fatalf("raw_events.data did not preserve OSAC fields verbatim: %s", string(storedRaw))
+	}
+	if _, injected := rawData["schema_version"]; injected {
+		t.Fatalf("raw_events.data unexpectedly injected schema_version into raw Kafka event: %s", string(storedRaw))
+	}
+
+	// Verify both entries landed under external_billing_account_id and sum to 249.5.
+	var entryCount int
+	var totalVal float64
+	if err := testStore.Pool().QueryRow(ctx, `
+		SELECT count(*), COALESCE(SUM(value), 0)
+		FROM metering_entries
+		WHERE resource_id = $1 AND tenant_id = $2 AND resource_type = 'volume' AND meter_name = 'capacity'
+	`, resourceID, billingAcct).Scan(&entryCount, &totalVal); err != nil {
+		t.Fatalf("query metering_entries: %v", err)
+	}
+	if entryCount != 2 {
+		t.Fatalf("metering_entries count = %d, want 2 (replay must not duplicate)", entryCount)
+	}
+	if totalVal != 249.5 {
+		t.Fatalf("metering_entries net sum = %v, want 249.5", totalVal)
+	}
+
+	// Verify usage-object osac.inference.usage.v1 always uses validated usage.quantity
+	// even when informational prompt_tokens/completion_tokens dimensions are present.
+	infEvent := map[string]interface{}{
+		"specversion":      "1.0",
+		"id":               "inf-usage-" + suffix,
+		"source":           "osac-metering",
+		"type":             "osac.inference.usage.v1",
+		"datacontenttype":  "application/json",
+		"time":             now.Format(time.RFC3339),
+		"osacresourceid":   "llama-3-" + suffix,
+		"osacresourcetype": "maas_inference",
+		"osactenant":       internalTenant,
+		"data": map[string]interface{}{
+			"schema_version":              "v1",
+			"tenant_id":                   internalTenant,
+			"external_billing_account_id": billingAcct,
+			"resource_type":               "maas_inference",
+			"resource_id":                 "llama-3-" + suffix,
+			"meter":                       "inference",
+			"component":                   "tokens",
+			"usage": map[string]interface{}{
+				"semantics": "delta",
+				"quantity":  "1200",
+				"unit":      "tokens",
+			},
+			"billing_dimensions": map[string]interface{}{"model": "llama-3", "prompt_tokens": 100, "completion_tokens": 50},
+		},
+	}
+	infResp := postSingle(infEvent)
+	infResp.Body.Close()
+	if infResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("inference usage event: want 204, got %d", infResp.StatusCode)
+	}
+	var infVal float64
+	if err := testStore.Pool().QueryRow(ctx, `
+		SELECT COALESCE(SUM(value), 0)
+		FROM metering_entries
+		WHERE resource_id = $1 AND tenant_id = $2 AND resource_type = 'maas_inference' AND meter_name = 'inference'
+	`, "llama-3-"+suffix, billingAcct).Scan(&infVal); err != nil {
+		t.Fatalf("query inference metering_entries: %v", err)
+	}
+	if infVal != 1200 {
+		t.Fatalf("inference metering value = %v, want 1200", infVal)
+	}
+}
+
+func TestIngestEvent_PreUpgradeLegacyReceiptDigestRemainsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	now := time.Now().UTC().Truncate(time.Second)
+	from := now.Add(-5 * time.Minute)
+
+	// Build a heartbeat event identical to what a client sends on replay.
+	eventID := "hb-preupgrade-" + suffix
+	resourceID := "vol-pre-" + suffix
+	bodyBytes := []byte(fmt.Sprintf(`{
+		"specversion": "1.0",
+		"id": "%s",
+		"source": "osac-metering",
+		"type": "osac.resource.heartbeat.v1",
+		"datacontenttype": "application/json",
+		"time": "%s",
+		"osacresourceid": "%s",
+		"osacresourcetype": "volume",
+		"osactenant": "tenant-pre",
+		"data": {
+			"tenant_id": "tenant-pre",
+			"resource_type": "volume",
+			"resource_id": "%s",
+			"meter": "capacity",
+			"component": "volume",
+			"heartbeat_time": "%s",
+			"usage": {
+				"semantics": "interval",
+				"from": "%s",
+				"to": "%s",
+				"quantity": "60.000000",
+				"unit": "gibibyte_second",
+				"precision": "second"
+			}
+		}
+	}`, eventID, from.Format(time.RFC3339), resourceID, resourceID, now.Format(time.RFC3339), from.Format(time.RFC3339), now.Format(time.RFC3339)))
+
+	// Compute the pre-upgrade legacy digest (json.Marshal of cloudEventInternal).
+	var legacyShape struct {
+		SpecVersion      string          `json:"specversion"`
+		Type             string          `json:"type"`
+		Source           string          `json:"source"`
+		ID               string          `json:"id"`
+		Time             time.Time       `json:"time"`
+		Subject          string          `json:"subject"`
+		DataContentType  string          `json:"datacontenttype"`
+		Data             json.RawMessage `json:"data"`
+		OSACResourceID   string          `json:"osacresourceid,omitempty"`
+		OSACResourceType string          `json:"osacresourcetype,omitempty"`
+		OSACTenant       string          `json:"osactenant,omitempty"`
+		OSACProject      string          `json:"osacproject,omitempty"`
+		OSACTrace        string          `json:"osactrace,omitempty"`
+	}
+	if err := json.Unmarshal(bodyBytes, &legacyShape); err != nil {
+		t.Fatalf("unmarshal legacy shape: %v", err)
+	}
+	marshaledLegacy, err := json.Marshal(legacyShape)
+	if err != nil {
+		t.Fatalf("marshal legacy shape: %v", err)
+	}
+	legacyDigest := fmt.Sprintf("%x", sha256.Sum256(marshaledLegacy))
+
+	// Seed a pre-upgrade ingestion_receipts row with the legacy digest.
+	if _, err := testStore.Pool().Exec(ctx, `
+		INSERT INTO ingestion_receipts (event_source, event_id, payload_sha256)
+		VALUES ('osac-metering', $1, $2)
+	`, eventID, legacyDigest); err != nil {
+		t.Fatalf("seed legacy receipt: %v", err)
+	}
+
+	// Exact replay after upgrade must return 204 no-op (not 409) and write 0 new entries.
+	resp, err := http.Post(testServer.URL+"/api/v1/events", "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("post replay: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("pre-upgrade receipt replay: want 204, got %d", resp.StatusCode)
+	}
+	var count int
+	if err := testStore.Pool().QueryRow(ctx, `SELECT count(*) FROM metering_entries WHERE resource_id = $1`, resourceID).Scan(&count); err != nil {
+		t.Fatalf("count metering entries: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("pre-upgrade replay should be no-op, got %d metering entries", count)
+	}
+
+	// Mutated payload with same (source, id) must still return 409 Conflict.
+	mutated := bytes.ReplaceAll(bodyBytes, []byte("60.000000"), []byte("99.000000"))
+	resp2, err := http.Post(testServer.URL+"/api/v1/events", "application/json", bytes.NewReader(mutated))
+	if err != nil {
+		t.Fatalf("post mutated collision: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusConflict {
+		t.Fatalf("mutated collision against pre-upgrade receipt: want 409, got %d", resp2.StatusCode)
+	}
+}
+
+func TestKafkaDeadLetterStoreAndPermanentErrorClassification(t *testing.T) {
+	ctx := context.Background()
+	h := api.NewAPIHandler(testStore, testMeter, nil, nil, testLogger)
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	type permanentErr interface {
+		error
+		DeadLetterReason() string
+	}
+
+	// Malformed JSON -> permanent error with invalid_json reason.
+	err := h.ProcessKafkaEvent(ctx, "osac.metering.heartbeat.acme", []byte(`{not-json`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	var perm permanentErr
+	if !errors.As(err, &perm) || perm.DeadLetterReason() != "invalid_json" {
+		t.Fatalf("expected permanent invalid_json error, got %T: %v", err, err)
+	}
+
+	// Future version -> permanent error with unsupported_version reason.
+	v2Payload := []byte(`{"specversion":"1.0","id":"v2-` + suffix + `","source":"osac-metering","type":"osac.resource.heartbeat.v2","time":"` + time.Now().UTC().Format(time.RFC3339) + `","data":{"tenant_id":"t1"}}`)
+	err = h.ProcessKafkaEvent(ctx, "osac.metering.heartbeat.acme", v2Payload)
+	if err == nil {
+		t.Fatal("expected error for v2 heartbeat")
+	}
+	perm = nil
+	if !errors.As(err, &perm) || perm.DeadLetterReason() != "unsupported_version" {
+		t.Fatalf("expected permanent unsupported_version error, got %T: %v", err, err)
+	}
+
+	// Persist to kafka_dead_letters and verify idempotent ON CONFLICT DO NOTHING
+	// leaves exactly one row for the (topic, partition, record_offset) key.
+	dl := inventory.KafkaDeadLetter{
+		Topic:        "osac.metering.heartbeat.test-" + suffix,
+		Partition:    0,
+		RecordOffset: 42,
+		RecordKey:    []byte("res-1"),
+		Payload:      v2Payload,
+		Reason:       perm.DeadLetterReason(),
+		ErrorMessage: err.Error(),
+	}
+	if err := testStore.InsertKafkaDeadLetter(ctx, dl); err != nil {
+		t.Fatalf("InsertKafkaDeadLetter first insert failed: %v", err)
+	}
+	if err := testStore.InsertKafkaDeadLetter(ctx, dl); err != nil {
+		t.Fatalf("InsertKafkaDeadLetter duplicate insert failed: %v", err)
+	}
+
+	var exactCount int
+	if err := testStore.Pool().QueryRow(ctx, `
+		SELECT count(*) FROM kafka_dead_letters
+		WHERE topic = $1 AND partition = $2 AND record_offset = $3
+	`, dl.Topic, dl.Partition, dl.RecordOffset).Scan(&exactCount); err != nil {
+		t.Fatalf("count exact dead letter row: %v", err)
+	}
+	if exactCount != 1 {
+		t.Fatalf("expected exactly 1 dead letter row for key, got %d", exactCount)
+	}
+
+	// Binary key with NUL bytes and nil tombstone payload must also persist cleanly.
+	binDL := inventory.KafkaDeadLetter{
+		Topic:        dl.Topic,
+		Partition:    0,
+		RecordOffset: 43,
+		RecordKey:    []byte{0x00, 0x01, 0x02},
+		Payload:      nil,
+		Reason:       "invalid_json",
+		ErrorMessage: "bad\x00byte",
+	}
+	if err := testStore.InsertKafkaDeadLetter(ctx, binDL); err != nil {
+		t.Fatalf("InsertKafkaDeadLetter binary key + nil payload failed: %v", err)
+	}
+
+	rows, err := testStore.ListKafkaDeadLetters(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListKafkaDeadLetters failed: %v", err)
+	}
+	foundV2, foundBin := false, false
+	for _, row := range rows {
+		if row.Topic == dl.Topic && row.RecordOffset == 42 && row.Reason == "unsupported_version" {
+			foundV2 = true
+		}
+		if row.Topic == binDL.Topic && row.RecordOffset == 43 && bytes.Equal(row.RecordKey, binDL.RecordKey) && len(row.Payload) == 0 {
+			foundBin = true
+		}
+	}
+	if !foundV2 || !foundBin {
+		t.Fatalf("expected both dead letter records in ListKafkaDeadLetters output (foundV2=%v foundBin=%v)", foundV2, foundBin)
 	}
 }
 

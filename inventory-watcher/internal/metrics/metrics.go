@@ -117,6 +117,14 @@ var (
 		Name:      "events_timestamp_drift_total",
 		Help:      "Accepted events whose timestamp drifted beyond the warn threshold.",
 	}, []string{"direction"})
+
+	// KafkaDeadLettersTotal counts Kafka records routed to the durable
+	// kafka_dead_letters table after permanent processing failures.
+	KafkaDeadLettersTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "kafka_dead_letters_total",
+		Help:      "Kafka records persisted to the dead-letter table due to permanent processing errors.",
+	}, []string{"topic", "reason"})
 )
 
 // Resource gauges (updated each sweep).
