@@ -421,7 +421,11 @@ func (h *APIHandler) processEvents(ctx context.Context, events []cloudEventInter
 			if err != nil {
 				return fmt.Errorf("digest event %s: %w", ce.ID, err)
 			}
-			claimed, err := txStore.ClaimIngestionReceipt(ctx, ce.Source, ce.ID, digest)
+			var compatDigests []string
+			if legacyDigest, legacyErr := legacyCloudEventDigest(ce); legacyErr == nil && legacyDigest != digest {
+				compatDigests = append(compatDigests, legacyDigest)
+			}
+			claimed, err := txStore.ClaimIngestionReceipt(ctx, ce.Source, ce.ID, digest, compatDigests...)
 			if err != nil {
 				return err
 			}
@@ -450,6 +454,18 @@ func canonicalEventPayload(ce cloudEventInternal) ([]byte, error) {
 
 func cloudEventDigest(ce cloudEventInternal) (string, error) {
 	payload, err := canonicalEventPayload(ce)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+// legacyCloudEventDigest computes the pre-canonicalization digest
+// (sha256 of json.Marshal(ce)) so exact replays of receipts stored before the
+// OSAC v1 canonical digest upgrade continue to match without 409 collisions.
+func legacyCloudEventDigest(ce cloudEventInternal) (string, error) {
+	payload, err := json.Marshal(ce)
 	if err != nil {
 		return "", err
 	}
@@ -641,7 +657,7 @@ func classifyEvent(ce cloudEventInternal) (resourceType, resourceID, tenantID st
 			rt = ce.Type
 		}
 		tenant := ce.OSACTenant
-		if ce.Type == eventTypeResourceHeartbeat || ce.Type == eventTypeInferenceUsage {
+		if isOSACIntervalHeartbeat(ce) || ce.Type == eventTypeInferenceUsage {
 			var acctPeek struct {
 				ExternalBillingAccountID *string `json:"external_billing_account_id"`
 			}
@@ -1006,13 +1022,13 @@ func (h *APIHandler) processOSACClusterOrder(ctx context.Context, ce cloudEventI
 }
 
 func (h *APIHandler) processOSACInference(ctx context.Context, ce cloudEventInternal, md meteringData) error {
+	if osacmetering.HasUsageObject(ce.Data) {
+		return h.processOSACIntervalUsage(ctx, ce)
+	}
+
 	var bd maasBillingDimensions
 	if len(md.BillingDimensions) > 0 {
 		_ = json.Unmarshal(md.BillingDimensions, &bd)
-	}
-
-	if osacmetering.HasUsageObject(ce.Data) && bd.PromptTokens == 0 && bd.CompletionTokens == 0 {
-		return h.processOSACIntervalUsage(ctx, ce)
 	}
 
 	modelID := bd.Model

@@ -354,3 +354,107 @@ func TestParseRawEvent_ValidationAndVersionErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestHasUsageObject_DetectsMalformedExplicitUsage(t *testing.T) {
+	if !HasUsageObject(json.RawMessage(`{"usage":{"quantity":1200,"unit":"tokens"}}`)) {
+		t.Error("expected malformed numeric usage.quantity to still be detected as explicit usage object")
+	}
+	if !HasUsageObject(json.RawMessage(`{"usage":"invalid"}`)) {
+		t.Error("expected non-object explicit usage field to be detected")
+	}
+	if !HasUsageObject(json.RawMessage(`{"usage":{}}`)) {
+		t.Error("expected empty explicit usage object to be detected")
+	}
+	if HasUsageObject(json.RawMessage(`{"usage":null}`)) {
+		t.Error("expected explicit null usage to return false")
+	}
+	if HasUsageObject(json.RawMessage(`{"tenant_id":"t1"}`)) {
+		t.Error("expected omitted usage to return false")
+	}
+}
+
+func TestParseRawEvent_SchemaVersionPresenceAndQuantityBoundsAndSemantics(t *testing.T) {
+	tests := []struct {
+		name            string
+		raw             string
+		wantUnsupported bool
+	}{
+		{
+			name: "explicit empty schema_version rejected",
+			raw: `{
+				"specversion":"1.0","id":"1","source":"osac-metering","type":"osac.resource.heartbeat.v1",
+				"time":"2026-10-01T12:00:00Z",
+				"data":{"schema_version":"","tenant_id":"t1","resource_type":"volume","resource_id":"v1","meter":"capacity","component":"volume","heartbeat_time":"2026-10-01T12:05:00Z","usage":{"semantics":"interval","from":"2026-10-01T12:00:00Z","to":"2026-10-01T12:05:00Z","quantity":"10","unit":"gibibyte_second","precision":"second"}}
+			}`,
+		},
+		{
+			name: "explicit null schema_version rejected",
+			raw: `{
+				"specversion":"1.0","id":"1","source":"osac-metering","type":"osac.resource.heartbeat.v1",
+				"time":"2026-10-01T12:00:00Z",
+				"data":{"schema_version":null,"tenant_id":"t1","resource_type":"volume","resource_id":"v1","meter":"capacity","component":"volume","heartbeat_time":"2026-10-01T12:05:00Z","usage":{"semantics":"interval","from":"2026-10-01T12:00:00Z","to":"2026-10-01T12:05:00Z","quantity":"10","unit":"gibibyte_second","precision":"second"}}
+			}`,
+		},
+		{
+			name: "quantity float overflow rejected (-1e309)",
+			raw: `{
+				"specversion":"1.0","id":"1","source":"osac-metering","type":"osac.resource.heartbeat.v1",
+				"time":"2026-10-01T12:00:00Z",
+				"data":{"tenant_id":"t1","resource_type":"volume","resource_id":"v1","meter":"capacity","component":"volume","heartbeat_time":"2026-10-01T12:05:00Z","usage":{"semantics":"interval","from":"2026-10-01T12:00:00Z","to":"2026-10-01T12:05:00Z","quantity":"-1e309","unit":"gibibyte_second","precision":"second"}}
+			}`,
+		},
+		{
+			name: "quantity NUMERIC(18,6) overflow rejected (1e13)",
+			raw: `{
+				"specversion":"1.0","id":"1","source":"osac-metering","type":"osac.resource.heartbeat.v1",
+				"time":"2026-10-01T12:00:00Z",
+				"data":{"tenant_id":"t1","resource_type":"volume","resource_id":"v1","meter":"capacity","component":"volume","heartbeat_time":"2026-10-01T12:05:00Z","usage":{"semantics":"interval","from":"2026-10-01T12:00:00Z","to":"2026-10-01T12:05:00Z","quantity":"1e13","unit":"gibibyte_second","precision":"second"}}
+			}`,
+		},
+		{
+			name: "nonzero quantity underflow rejected (-1e-400)",
+			raw: `{
+				"specversion":"1.0","id":"1","source":"osac-metering","type":"osac.resource.heartbeat.v1",
+				"time":"2026-10-01T12:00:00Z",
+				"data":{"tenant_id":"t1","resource_type":"volume","resource_id":"v1","meter":"capacity","component":"volume","heartbeat_time":"2026-10-01T12:05:00Z","usage":{"semantics":"interval","from":"2026-10-01T12:00:00Z","to":"2026-10-01T12:05:00Z","quantity":"-1e-400","unit":"gibibyte_second","precision":"second"}}
+			}`,
+		},
+		{
+			name: "inference cumulative semantics rejected",
+			raw: `{
+				"specversion":"1.0","id":"1","source":"osac-metering","type":"osac.inference.usage.v1",
+				"time":"2026-10-01T12:00:00Z",
+				"data":{"tenant_id":"t1","resource_type":"maas_inference","resource_id":"m1","usage":{"semantics":"cumulative","quantity":"1200","unit":"tokens"}}
+			}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseRawEvent([]byte(tc.raw))
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !IsPermanentError(err) {
+				t.Errorf("expected permanent error, got %T: %v", err, err)
+			}
+		})
+	}
+
+	// Verify explicit zero and fractional-second timestamp round-trip cleanly.
+	validRaw := []byte(`{
+		"specversion":"1.0","id":"frac-1","source":"osac-metering","type":"osac.resource.heartbeat.v1",
+		"time":"2026-10-01T12:00:00.123456Z",
+		"data":{"tenant_id":"t1","resource_type":"volume","resource_id":"v1","meter":"capacity","component":"volume","heartbeat_time":"2026-10-01T12:05:00Z","usage":{"semantics":"interval","from":"2026-10-01T12:00:00Z","to":"2026-10-01T12:05:00Z","quantity":"0.000000","unit":"gibibyte_second","precision":"second"}}
+	}`)
+	got, err := ParseRawEvent(validRaw)
+	if err != nil {
+		t.Fatalf("expected explicit zero + fractional time to succeed: %v", err)
+	}
+	if got.Envelope.Time != "2026-10-01T12:00:00.123456Z" {
+		t.Errorf("Envelope.Time = %q, want 2026-10-01T12:00:00.123456Z", got.Envelope.Time)
+	}
+	if !got.Quantity.IsZero() {
+		t.Errorf("Quantity = %s, want 0", got.Quantity)
+	}
+}

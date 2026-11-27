@@ -173,6 +173,15 @@ func TestBuildClientOptions_RejectsBadCAAndMissingPassword(t *testing.T) {
 	}).BuildClientOptions(); err == nil {
 		t.Error("expected missing SASL password to fail")
 	}
+
+	// Explicit TLSEnabled=false must honor plaintext even if TLSCACert is populated.
+	if _, err := (Config{
+		Brokers:    []string{"localhost:9092"},
+		TLSEnabled: false,
+		TLSCACert:  "/nonexistent/ca.crt",
+	}).BuildClientOptions(); err != nil {
+		t.Errorf("expected TLSEnabled=false to ignore TLSCACert, got error: %v", err)
+	}
 }
 
 func TestProcessPartitions_PermanentErrorDeadLettersAndCommits(t *testing.T) {
@@ -301,5 +310,44 @@ func TestProcessPartitions_DLQFailureRetriesUntilPersisted(t *testing.T) {
 	}
 	if len(committed) != 1 || committed[0].Offset != 5 {
 		t.Fatalf("expected offset 5 committed only after DLQ persisted, got %+v", committed)
+	}
+}
+
+func TestProcessPartitions_PreservesBinaryKeyAndNilValueInDeadLetter(t *testing.T) {
+	dlq := &recordingDLQ{}
+	var committed []*kgo.Record
+
+	c := &Consumer{
+		processor: funcProcessor(func(_ context.Context, _ string, _ []byte) error {
+			return stubPermanentError{reason: "invalid_json", msg: "unexpected end of JSON input"}
+		}),
+		deadLetters: dlq,
+		logger:      testLogger(),
+		commitRecords: func(_ context.Context, rs ...*kgo.Record) error {
+			committed = append(committed, rs...)
+			return nil
+		},
+		retryInitialBackoff: time.Millisecond,
+		retryMaxBackoff:     2 * time.Millisecond,
+	}
+
+	binKey := []byte{0x00, 0x01, 0xff}
+	recs := []*kgo.Record{
+		{Topic: "osac.metering.heartbeat.acme", Partition: 0, Offset: 9, Key: binKey, Value: nil},
+	}
+	if err := c.processPartitions(context.Background(), []kgo.FetchTopicPartition{{
+		Topic:          "osac.metering.heartbeat.acme",
+		FetchPartition: kgo.FetchPartition{Partition: 0, Records: recs},
+	}}); err != nil {
+		t.Fatalf("processPartitions failed: %v", err)
+	}
+	if len(dlq.records) != 1 {
+		t.Fatalf("dead letters = %d, want 1", len(dlq.records))
+	}
+	if string(dlq.records[0].RecordKey) != string(binKey) {
+		t.Errorf("RecordKey = %x, want %x", dlq.records[0].RecordKey, binKey)
+	}
+	if len(committed) != 1 || committed[0].Offset != 9 {
+		t.Fatalf("expected offset 9 committed, got %+v", committed)
 	}
 }

@@ -313,7 +313,7 @@ type KafkaDeadLetter struct {
 	Topic        string    `json:"topic"`
 	Partition    int32     `json:"partition"`
 	RecordOffset int64     `json:"record_offset"`
-	RecordKey    string    `json:"record_key"`
+	RecordKey    []byte    `json:"record_key"`
 	Payload      []byte    `json:"payload"`
 	Reason       string    `json:"reason"`
 	ErrorMessage string    `json:"error_message"`

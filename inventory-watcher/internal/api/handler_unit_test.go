@@ -213,4 +213,49 @@ func TestCloudEventDigest_MatchesAcrossRawKafkaAndLockedAdapterPaths(t *testing.
 	if dRaw == dCollision {
 		t.Fatalf("expected different digest when usage quantity changed")
 	}
+
+	// Sub-second time differences must also produce distinct digests.
+	subsec := rawKafka
+	subsec.Time = ts.Add(123 * time.Millisecond)
+	dSubsec, err := cloudEventDigest(subsec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dRaw == dSubsec {
+		t.Fatalf("expected different digest when sub-second time differs")
+	}
+}
+
+func TestValidateCloudEvent_RejectsMalformedExplicitUsageOnInference(t *testing.T) {
+	h := &APIHandler{logger: slog.Default()}
+	event := cloudEventInternal{
+		SpecVersion: "1.0", ID: "inf-malformed-1", Source: "osac-metering", Type: eventTypeInferenceUsage,
+		DataContentType: "application/json", Time: time.Now().UTC(),
+		OSACResourceID: "m-1", OSACResourceType: "maas_inference", OSACTenant: "tenant-1",
+		// Numeric usage.quantity + nonzero prompt_tokens must NOT fall back to legacy path.
+		Data: json.RawMessage(`{
+			"tenant_id": "tenant-1",
+			"resource_type": "maas_inference",
+			"resource_id": "m-1",
+			"usage": {"quantity": 1200, "unit": "tokens"},
+			"billing_dimensions": {"model": "llama-3", "prompt_tokens": 100}
+		}`),
+	}
+	if err := h.validateCloudEvent(event); err == nil {
+		t.Fatal("expected malformed explicit usage object to fail validation instead of falling back to legacy path")
+	}
+}
+
+func TestClassifyEvent_LegacyHeartbeatRetainsInternalTenant(t *testing.T) {
+	// Legacy lifecycle heartbeat (has current_state, no usage) must not override
+	// raw_events.tenant_id with external_billing_account_id since inventory upsert uses tenant_id.
+	legacyHB := cloudEventInternal{
+		SpecVersion: "1.0", ID: "legacy-hb-1", Source: "osac-metering", Type: eventTypeResourceHeartbeat,
+		Time: time.Now().UTC(), OSACResourceID: "vm-1", OSACResourceType: "compute_instance", OSACTenant: "tenant-internal",
+		Data: json.RawMessage(`{"resource_id":"vm-1","resource_type":"compute_instance","tenant_id":"tenant-internal","external_billing_account_id":"acct-ext","current_state":"RUNNING"}`),
+	}
+	_, _, tenant := classifyEvent(legacyHB)
+	if tenant != "tenant-internal" {
+		t.Fatalf("legacy heartbeat tenant = %q, want tenant-internal", tenant)
+	}
 }

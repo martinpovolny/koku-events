@@ -1,14 +1,20 @@
 package osacmetering
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
 )
+
+// maxAbsQuantity is the largest absolute magnitude representable in
+// PostgreSQL metering_entries.value NUMERIC(18,6) (< 10^12).
+var maxAbsQuantity = decimal.RequireFromString("999999999999.999999")
 
 var supportedHeartbeatResourceTypes = map[string]struct{}{
 	ResourceTypeComputeInstance:   {},
@@ -37,7 +43,7 @@ type EnvelopeInput struct {
 }
 
 type rawUsagePayload struct {
-	SchemaVersion            string          `json:"schema_version"`
+	SchemaVersion            json.RawMessage `json:"schema_version"`
 	TenantID                 string          `json:"tenant_id"`
 	ExternalBillingAccountID *string         `json:"external_billing_account_id,omitempty"`
 	ProjectID                *string         `json:"project_id,omitempty"`
@@ -72,20 +78,22 @@ func IsUnsupportedOSACVersion(eventType string) bool {
 	return false
 }
 
-// HasUsageObject reports whether a CloudEvent data payload carries an explicit
-// OSAC v1 usage object (distinguishing canonical interval/delta usage events
-// from legacy lifecycle state-transition events).
+// HasUsageObject reports whether a CloudEvent data payload explicitly includes
+// a non-null usage field (distinguishing canonical interval/delta usage events
+// — including malformed ones that must be rejected by the v1 translator — from
+// legacy lifecycle/inference events that omit usage or set it to null).
 func HasUsageObject(rawData json.RawMessage) bool {
-	if len(rawData) == 0 || string(rawData) == "null" {
+	if len(rawData) == 0 || bytes.Equal(bytes.TrimSpace(rawData), []byte("null")) {
 		return false
 	}
 	var peek struct {
-		Usage *rawUsageObject `json:"usage"`
+		Usage json.RawMessage `json:"usage"`
 	}
-	if err := json.Unmarshal(rawData, &peek); err != nil || peek.Usage == nil {
+	if err := json.Unmarshal(rawData, &peek); err != nil {
 		return false
 	}
-	return peek.Usage.Semantics != "" || peek.Usage.Quantity != "" || peek.Usage.From != "" || peek.Usage.To != ""
+	trimmed := bytes.TrimSpace(peek.Usage)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
 // ParseRawEvent decodes a raw structured CloudEvent JSON payload and translates
@@ -144,10 +152,8 @@ func translateHeartbeat(in EnvelopeInput) (*NormalizedUsage, error) {
 	if err := json.Unmarshal(in.Data, &data); err != nil {
 		return nil, &ValidationError{Message: "invalid OSAC heartbeat data", Err: err}
 	}
-	if data.SchemaVersion != "" && data.SchemaVersion != ContractVersion {
-		return nil, &UnsupportedVersionError{
-			Message: fmt.Sprintf("unsupported OSAC usage schema_version %q, want %q", data.SchemaVersion, ContractVersion),
-		}
+	if err := validateOptionalSchemaVersion(data.SchemaVersion); err != nil {
+		return nil, err
 	}
 	if err := validateIdentity(in, data); err != nil {
 		return nil, err
@@ -183,7 +189,7 @@ func translateHeartbeat(in EnvelopeInput) (*NormalizedUsage, error) {
 		Source:          in.Source,
 		Type:            in.Type,
 		DataContentType: ApplicationJSON,
-		Time:            in.Time.UTC().Format(time.RFC3339),
+		Time:            in.Time.UTC().Format(time.RFC3339Nano),
 		Subject:         in.Subject,
 		ResourceID:      data.ResourceID,
 		ResourceType:    data.ResourceType,
@@ -226,10 +232,8 @@ func translateInference(in EnvelopeInput) (*NormalizedUsage, error) {
 	if err := json.Unmarshal(in.Data, &data); err != nil {
 		return nil, &ValidationError{Message: "invalid OSAC inference data", Err: err}
 	}
-	if data.SchemaVersion != "" && data.SchemaVersion != ContractVersion {
-		return nil, &UnsupportedVersionError{
-			Message: fmt.Sprintf("unsupported OSAC usage schema_version %q, want %q", data.SchemaVersion, ContractVersion),
-		}
+	if err := validateOptionalSchemaVersion(data.SchemaVersion); err != nil {
+		return nil, err
 	}
 	if err := validateIdentity(in, data); err != nil {
 		return nil, err
@@ -245,6 +249,15 @@ func translateInference(in EnvelopeInput) (*NormalizedUsage, error) {
 	qty, err := validateQuantityAndUnit(*data.Usage)
 	if err != nil {
 		return nil, err
+	}
+
+	semantics := data.Usage.Semantics
+	if semantics == "" {
+		semantics = UsageSemanticsDelta
+	} else if semantics != UsageSemanticsDelta && semantics != UsageSemanticsInterval {
+		return nil, &ValidationError{
+			Message: fmt.Sprintf("unsupported inference usage.semantics %q, want %q or %q", semantics, UsageSemanticsDelta, UsageSemanticsInterval),
+		}
 	}
 
 	periodStart := in.Time.UTC()
@@ -280,10 +293,6 @@ func translateInference(in EnvelopeInput) (*NormalizedUsage, error) {
 	if component == "" {
 		component = meter
 	}
-	semantics := data.Usage.Semantics
-	if semantics == "" {
-		semantics = UsageSemanticsDelta
-	}
 
 	env := CloudEventEnvelope{
 		SpecVersion:     CloudEventVersionV1,
@@ -291,7 +300,7 @@ func translateInference(in EnvelopeInput) (*NormalizedUsage, error) {
 		Source:          in.Source,
 		Type:            in.Type,
 		DataContentType: ApplicationJSON,
-		Time:            in.Time.UTC().Format(time.RFC3339),
+		Time:            in.Time.UTC().Format(time.RFC3339Nano),
 		Subject:         in.Subject,
 		ResourceID:      data.ResourceID,
 		ResourceType:    data.ResourceType,
@@ -389,6 +398,30 @@ func validateIntervalUsage(u rawUsageObject) (time.Time, time.Time, decimal.Deci
 	return fromTime, toTime, qty, nil
 }
 
+func validateOptionalSchemaVersion(raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		// Field omitted: valid for raw OSAC v1 Kafka events.
+		return nil
+	}
+	if bytes.Equal(trimmed, []byte("null")) {
+		return &ValidationError{Message: "schema_version must be a non-empty string when present"}
+	}
+	var version string
+	if err := json.Unmarshal(trimmed, &version); err != nil {
+		return &ValidationError{Message: "schema_version must be a string", Err: err}
+	}
+	if version == "" {
+		return &ValidationError{Message: "schema_version must not be empty when present"}
+	}
+	if version != ContractVersion {
+		return &UnsupportedVersionError{
+			Message: fmt.Sprintf("unsupported OSAC usage schema_version %q, want %q", version, ContractVersion),
+		}
+	}
+	return nil
+}
+
 func validateQuantityAndUnit(u rawUsageObject) (decimal.Decimal, error) {
 	if u.Quantity == "" {
 		return decimal.Zero, &ValidationError{Message: "usage missing quantity"}
@@ -396,6 +429,16 @@ func validateQuantityAndUnit(u rawUsageObject) (decimal.Decimal, error) {
 	qty, err := decimal.NewFromString(u.Quantity)
 	if err != nil {
 		return decimal.Zero, &ValidationError{Message: fmt.Sprintf("invalid decimal usage.quantity %q", u.Quantity), Err: err}
+	}
+	if qty.Abs().GreaterThan(maxAbsQuantity) {
+		return decimal.Zero, &ValidationError{Message: fmt.Sprintf("usage.quantity %q exceeds supported NUMERIC(18,6) range", u.Quantity)}
+	}
+	f := qty.InexactFloat64()
+	if math.IsInf(f, 0) || math.IsNaN(f) {
+		return decimal.Zero, &ValidationError{Message: fmt.Sprintf("usage.quantity %q is not a finite number", u.Quantity)}
+	}
+	if !qty.IsZero() && (qty.Round(6).IsZero() || f == 0) {
+		return decimal.Zero, &ValidationError{Message: fmt.Sprintf("usage.quantity %q underflows supported precision", u.Quantity)}
 	}
 	if u.Unit == "" {
 		return decimal.Zero, &ValidationError{Message: "usage missing unit"}

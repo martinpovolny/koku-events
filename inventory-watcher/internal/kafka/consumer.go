@@ -118,7 +118,7 @@ func NewConsumer(cfg Config, processor EventProcessor, logger *slog.Logger, opts
 		"brokers", cleanBrokers(cfg.Brokers),
 		"group", cfg.ConsumerGroup,
 		"reader_mode", mode,
-		"tls", cfg.TLSEnabled || cfg.TLSCACert != "",
+		"tls", cfg.TLSEnabled,
 		"sasl", cfg.SASLUsername != "",
 		"topics", topicDesc,
 	)
@@ -236,7 +236,7 @@ func (c *Consumer) handleRecordWithRetry(ctx context.Context, r *kgo.Record, flu
 					Topic:        r.Topic,
 					Partition:    r.Partition,
 					RecordOffset: r.Offset,
-					RecordKey:    string(r.Key),
+					RecordKey:    r.Key,
 					Payload:      r.Value,
 					Reason:       reason,
 					ErrorMessage: err.Error(),

@@ -107,7 +107,7 @@ func (c Config) BuildClientOptions() ([]kgo.Opt, error) {
 		kgo.SeedBrokers(brokers...),
 	}
 
-	if c.TLSEnabled || c.TLSCACert != "" {
+	if c.TLSEnabled {
 		tlsCfg, err := buildTLSConfig(c.TLSCACert)
 		if err != nil {
 			return nil, err

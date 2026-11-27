@@ -188,9 +188,15 @@ paths:
             Invalid JSON, missing required fields (`id`, `type`),
             missing resource/tenant IDs in the event data, or the
             event `time` is outside the accepted window:
-            more than 2 hours in the past (prevents backdating attacks
-            that would inject data into closed billing periods) or more
-            than 5 minutes in the future (indicates a misconfigured clock).
+            more than 2 hours in the past for non-heartbeat events
+            (prevents backdating attacks that would inject data into
+            closed billing periods) or more than 5 minutes in the
+            future (indicates a misconfigured clock).
+            `osac.resource.heartbeat.v1` interval usage events are
+            exempt from the 2-hour past-age limit so backdated UTC-day
+            and invoiced-period corrections are accepted, while both
+            event `time` and `data.heartbeat_time` remain capped at
+            5 minutes in the future.
           content:
             application/json:
               schema:
@@ -1749,9 +1755,12 @@ components:
         data:
           description: >-
             Event payload; shape depends on `type`.
-            See ComputeInstanceEventData (VMaaS),
-            ClusterEventData (CaaS), MaaSEventData (MaaS/IPP).
+            See OSACUsageEventData (`osac.resource.heartbeat.v1` and
+            usage-object `osac.inference.usage.v1`),
+            ComputeInstanceEventData (legacy VMaaS),
+            ClusterEventData (legacy CaaS), and MaaSEventData (MaaS/IPP).
           oneOf:
+            - $ref: "#/components/schemas/OSACUsageEventData"
             - $ref: "#/components/schemas/ComputeInstanceEventData"
             - $ref: "#/components/schemas/ClusterEventData"
             - $ref: "#/components/schemas/MaaSEventData"
@@ -1767,12 +1776,92 @@ components:
           items:
             $ref: "#/components/schemas/CloudEvent"
 
+    OSACUsageInterval:
+      type: object
+      description: >-
+        One measured usage slice in Cost Management's locked v1 contract.
+        Negative decimal quantities represent additive billing corrections.
+      required: [quantity, unit]
+      properties:
+        semantics:
+          type: string
+          enum: [interval, delta]
+          description: Additive usage semantics (`interval` for heartbeats; `delta` or `interval` for inference)
+          example: interval
+        from:
+          type: string
+          format: date-time
+          description: Interval start timestamp (RFC3339, required for `interval` heartbeats)
+        to:
+          type: string
+          format: date-time
+          description: Interval end timestamp (RFC3339, required for `interval` heartbeats)
+        quantity:
+          type: string
+          description: Fixed-point signed decimal quantity (up to 6 decimal places, magnitude < 1e12)
+          example: "300.000000"
+        unit:
+          type: string
+          description: Measurement unit (e.g. `seconds`, `gibibyte_second`, `bytes`, `tokens`)
+          example: gibibyte_second
+        precision:
+          type: string
+          description: Measurement precision (required for heartbeats, e.g. `second`)
+          example: second
+
+    OSACUsageEventData:
+      type: object
+      description: >-
+        Locked Cost Management v1 usage payload for `osac.resource.heartbeat.v1`
+        (all 6 OSAC resource types) and usage-object `osac.inference.usage.v1`.
+      required: [tenant_id, resource_type, resource_id, usage]
+      properties:
+        schema_version:
+          type: string
+          enum: [v1]
+          description: Locked contract version (`v1` when set; may be omitted on raw OSAC v1 Kafka events)
+        tenant_id:
+          type: string
+          description: Internal OSAC tenant identifier
+        external_billing_account_id:
+          type: string
+          description: Optional external billing account ID (takes precedence over `tenant_id` for billing attribution)
+        project_id:
+          type: string
+          description: Optional project identifier
+        resource_type:
+          type: string
+          enum: [compute_instance, cluster_order, bare_metal_instance, external_ip, nat_gateway, volume, maas_inference]
+        resource_id:
+          type: string
+          description: Resource UUID or identifier
+        meter:
+          type: string
+          description: Billing meter name (e.g. `compute`, `control_plane`, `allocation`, `consumption`, `capacity`, `inference`)
+        component:
+          type: string
+          description: Logical resource component
+        heartbeat_time:
+          type: string
+          format: date-time
+          description: Emission timestamp of the heartbeat (required for `osac.resource.heartbeat.v1`)
+        usage:
+          $ref: "#/components/schemas/OSACUsageInterval"
+        billing_dimensions:
+          type: object
+          additionalProperties:
+            type: string
+          description: Identity and pricing dimensions (e.g. `project`, `catalog`, `instance_type`)
+
     ComputeInstanceEventData:
       type: object
       description: >-
         OSAC metering collector VMaaS schema
         (`osac.compute_instance.lifecycle`). Metered when the instance
         is in a billable state.
+      required: [instance_id]
+      not:
+        required: [resource_type]
       properties:
         tenant_id:
           type: string
@@ -1824,6 +1913,9 @@ components:
         OSAC metering collector CaaS schema
         (`osac.cluster.lifecycle`). Metered when the cluster is in
         a billable state.
+      required: [cluster_id]
+      not:
+        required: [resource_type]
       properties:
         tenant_id:
           type: string
@@ -1872,6 +1964,11 @@ components:
         **Tenant attribution priority:** `organization_id` >
         `subscription` (namespace extracted) > `group` > `user` >
         `tenant_id` > CloudEvent `subject`.
+      anyOf:
+        - required: [model]
+        - required: [model_id]
+      not:
+        required: [resource_type]
       properties:
         # Legacy mock fields
         tenant_id:
