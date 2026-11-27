@@ -36,12 +36,13 @@ jobs:
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          # GO-2026-6061 and GO-2026-6348 (grpc-go HTTP/2 transport) suppressed:
-          # Upgrading grpc-go ≥1.67 breaks ALPN negotiation with OSAC
-          # fulfillment-service (does not advertise h2 in TLS ALPN).
-          # PR #112 pinned v1.66.0 as workaround. Keep the pin until OSAC adds
-          # h2 ALPN support, or we use grpc-go experimental
-          # credentials.NewTLSWithALPNDisabled (temporary upstream API).
+          # GO-2026-6859 (net/http@go1.26.10, fixed in go1.26.11) temporarily
+          # suppressed: Go 1.26.11 added an unconditional cmd/go LTO-section check
+          # that rejects github.com/gorules/zen-go@v0.20.0's prebuilt libzen_ffi.a
+          # ("disallowed LTO section .llvmbc" on Linux / __LLVM,__bitcode on macOS),
+          # and v0.20.0 is currently the latest upstream release.
+          # Remove this suppression and bump go.mod to go 1.26.11+ once
+          # gorules/zen-go ships a release built without embedded LTO bitcode.
           set +e
           output=$(govulncheck ./... 2>&1)
           rc=$?
@@ -49,10 +50,10 @@ jobs:
           if [ $rc -eq 0 ]; then
             exit 0
           fi
-          # Check if the only finding is the suppressed vuln
-          unsuppressed=$(echo "$output" | grep "^Vulnerability #" | grep -v -E "GO-2026-6061|GO-2026-6348" || true)
+          # Check if the only finding is the temporarily suppressed vuln
+          unsuppressed=$(echo "$output" | grep "^Vulnerability #" | grep -v -E "GO-2026-6859" || true)
           if [ -z "$unsuppressed" ]; then
-            echo "::notice::GO-2026-6061 and GO-2026-6348 suppressed (grpc-go ALPN incompatibility with OSAC)"
+            echo "::notice::GO-2026-6859 temporarily suppressed (go 1.26.11 LTO check breaks gorules/zen-go@v0.20.0)"
             exit 0
           fi
           echo "::error::Unsuppressed vulnerabilities found"
