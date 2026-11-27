@@ -279,7 +279,7 @@ check "osac-reader interval + negative correction net metering" "2:99.5" "$READE
 BUILTIN_SKIPPED=$(db_query "SELECT count(*) FROM raw_events WHERE event_id IN ('${READER_SYS_ID}', '${READER_SHD_ID}');")
 check "system and shared heartbeat topics ignored" "0" "$BUILTIN_SKIPPED"
 
-DLQ_COUNT=$(db_query "SELECT count(*) FROM kafka_dead_letters WHERE topic = 'osac.metering.heartbeat.tenant-ci' AND error_reason = 'unsupported_version';")
+DLQ_COUNT=$(db_query "SELECT count(*) FROM kafka_dead_letters WHERE topic = 'osac.metering.heartbeat.tenant-ci' AND reason = 'unsupported_version';")
 check "unsupported v2 event persisted to kafka_dead_letters" "1" "$DLQ_COUNT"
 
 DLQ_METRIC=$(curl -sf http://localhost:19005/metrics 2>/dev/null | grep -c 'cost_consumer_kafka_dead_letters_total{reason="unsupported_version",topic="osac.metering.heartbeat.tenant-ci"} 1' || true)

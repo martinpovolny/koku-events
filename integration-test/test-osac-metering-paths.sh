@@ -273,7 +273,7 @@ check "Path 2 raw_events did not inject schema_version" "false" "$P2_RAW_NO_SCHE
 P2_BUILTIN=$(db_query "$DB_DIRECT" "SELECT count(*) FROM raw_events WHERE event_id IN ('${SYS_EVT}', '${SHD_EVT}');")
 check "Path 2 direct reader ignored system and shared topics" "0" "$P2_BUILTIN"
 
-P2_DLQ_COUNT=$(db_query "$DB_DIRECT" "SELECT count(*) FROM kafka_dead_letters WHERE topic = 'osac.metering.heartbeat.tenant-e2e' AND error_reason = 'unsupported_version';")
+P2_DLQ_COUNT=$(db_query "$DB_DIRECT" "SELECT count(*) FROM kafka_dead_letters WHERE topic = 'osac.metering.heartbeat.tenant-e2e' AND reason = 'unsupported_version';")
 check "Path 2 persisted unsupported v2 event to kafka_dead_letters" "1" "$P2_DLQ_COUNT"
 
 # ── Summary ──
