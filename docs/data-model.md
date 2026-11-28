@@ -93,9 +93,10 @@ entries. The balance check API compares metering usage against quotas.
 
 | Table | Go Model | Purpose |
 |---|---|---|
-| `metering_entries` | [`MeteringEntry`](../inventory-watcher/internal/inventory/models.go) | Per-meter-per-interval usage records. Produced by the 60s metering sweep (VMs/clusters) or on event arrival (MaaS). |
+| `metering_entries` | [`MeteringEntry`](../inventory-watcher/internal/inventory/models.go) | Per-meter-per-interval usage records. Produced by the 60s metering sweep (VMs/clusters) or on event arrival (MaaS / OSAC v1 heartbeats). Persists `deployment`, `cluster_id`, and `billing_dimensions` JSONB so daily rollups never scan `raw_events`. |
 | `rates` | [`RateRecord`](../inventory-watcher/internal/inventory/models.go) | Pricing definitions. Flat rate or tiered pricing via `tiers` JSONB. Tenant-specific overrides supported. |
-| `cost_entries` | [`CostEntry`](../inventory-watcher/internal/inventory/models.go) | `metering × rate = cost`. Produced by the 30s rating sweep. |
+| `cost_entries` | [`CostEntry`](../inventory-watcher/internal/inventory/models.go) | `metering × rate = cost`. Produced by the 30s rating sweep. Includes `created_at TIMESTAMPTZ` (indexed on `(created_at, period_start)`) for incremental watermark-driven dirty-date discovery. |
+| `v1_daily_cost_rollup` (view) | [`DailyCostRollupRow`](../inventory-watcher/internal/inventory/models.go) | Versioned SQL view joining `cost_entries`, `metering_entries`, `rates`, and optional `inventory_*` tables into signed UTC-day attribution rollups for `GET /api/v1/export/daily`. |
 | `quotas` | [`QuotaRecord`](../inventory-watcher/internal/inventory/models.go) | Resource limits per tenant per meter per period. Consumed via the quota status API. Columns include `name TEXT` (human-readable quota name), `policy TEXT` (deny/charge — behavior when quota exceeded), `thresholds JSONB` (per-quota threshold levels; defaults to [50,70,90,100] if NULL). |
 
 ### Data Flow

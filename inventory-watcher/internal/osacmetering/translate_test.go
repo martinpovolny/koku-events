@@ -458,3 +458,53 @@ func TestParseRawEvent_SchemaVersionPresenceAndQuantityBoundsAndSemantics(t *tes
 		t.Errorf("Quantity = %s, want 0", got.Quantity)
 	}
 }
+
+func TestToMeteringEntry_EnrichmentDimensions(t *testing.T) {
+	vmRaw := []byte(`{
+		"specversion":"1.0","id":"dim-vm-1","source":"osac-metering","type":"osac.resource.heartbeat.v1",
+		"datacontenttype":"application/json","time":"2026-10-01T12:00:00Z",
+		"osacresourceid":"vm-1","osacresourcetype":"compute_instance","osactenant":"t1",
+		"data":{
+			"schema_version":"v1","tenant_id":"t1","project_id":"p1",
+			"resource_type":"compute_instance","resource_id":"vm-1",
+			"meter":"compute","component":"compute","heartbeat_time":"2026-10-01T12:05:00Z",
+			"usage":{"semantics":"interval","from":"2026-10-01T12:00:00Z","to":"2026-10-01T12:05:00Z","quantity":"300","unit":"seconds","precision":"second"},
+			"billing_dimensions":{"deployment":"eu-west-1","cluster_id":"cl-42","user_id":"alice","env":"staging"}
+		}
+	}`)
+	vmNorm, err := ParseRawEvent(vmRaw)
+	if err != nil {
+		t.Fatalf("ParseRawEvent vm: %v", err)
+	}
+	vmEntry := vmNorm.ToMeteringEntry()
+	if vmEntry.Deployment != "eu-west-1" || vmEntry.ClusterID != "cl-42" || vmEntry.UserID != "alice" {
+		t.Fatalf("unexpected vm enrichment: deployment=%q cluster=%q user=%q", vmEntry.Deployment, vmEntry.ClusterID, vmEntry.UserID)
+	}
+	var dims map[string]string
+	if err := json.Unmarshal(vmEntry.BillingDimensions, &dims); err != nil {
+		t.Fatalf("unmarshal billing_dimensions: %v", err)
+	}
+	if dims["env"] != "staging" {
+		t.Errorf("billing_dimensions[env] = %q, want staging", dims["env"])
+	}
+
+	clusterRaw := []byte(`{
+		"specversion":"1.0","id":"dim-cl-1","source":"osac-metering","type":"osac.resource.heartbeat.v1",
+		"datacontenttype":"application/json","time":"2026-10-01T12:00:00Z",
+		"osacresourceid":"cluster-order-9","osacresourcetype":"cluster_order","osactenant":"t1",
+		"data":{
+			"schema_version":"v1","tenant_id":"t1",
+			"resource_type":"cluster_order","resource_id":"cluster-order-9",
+			"meter":"cluster","component":"control_plane","heartbeat_time":"2026-10-01T12:05:00Z",
+			"usage":{"semantics":"interval","from":"2026-10-01T12:00:00Z","to":"2026-10-01T12:05:00Z","quantity":"300","unit":"seconds","precision":"second"}
+		}
+	}`)
+	clNorm, err := ParseRawEvent(clusterRaw)
+	if err != nil {
+		t.Fatalf("ParseRawEvent cluster_order: %v", err)
+	}
+	clEntry := clNorm.ToMeteringEntry()
+	if clEntry.ClusterID != "cluster-order-9" {
+		t.Errorf("cluster_order ClusterID = %q, want cluster-order-9", clEntry.ClusterID)
+	}
+}

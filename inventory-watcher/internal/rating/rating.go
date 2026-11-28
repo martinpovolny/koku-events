@@ -49,6 +49,11 @@ func (r *Rater) Run(ctx context.Context) error {
 	}
 }
 
+// SweepOnce runs a single rating sweep synchronously (useful for tests and on-demand rating).
+func (r *Rater) SweepOnce(ctx context.Context) {
+	r.sweep(ctx)
+}
+
 func (r *Rater) sweep(ctx context.Context) {
 	start := time.Now()
 	totalRated, totalSkipped := 0, 0

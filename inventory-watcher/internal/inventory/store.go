@@ -486,6 +486,84 @@ BEGIN
     END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_kdl_failed_at ON kafka_dead_letters (failed_at DESC);
+
+-- Export watermark timestamp for incremental dirty-date sync (G1 / D9)
+ALTER TABLE cost_entries ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+CREATE INDEX IF NOT EXISTS idx_ce_created_at_period ON cost_entries (created_at, period_start);
+
+-- Persist enrichment dimensions on metering_entries so daily rollups never scan raw_events (G2-G4)
+ALTER TABLE metering_entries ADD COLUMN IF NOT EXISTS deployment TEXT NOT NULL DEFAULT '';
+ALTER TABLE metering_entries ADD COLUMN IF NOT EXISTS cluster_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE metering_entries ADD COLUMN IF NOT EXISTS billing_dimensions JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- Versioned daily rollup contract view for Koku pull export (G5 / D10 / D15)
+CREATE OR REPLACE VIEW v1_daily_cost_rollup AS
+SELECT
+    (ce.period_start AT TIME ZONE 'UTC')::date AS usage_date,
+    ce.tenant_id AS tenant_id,
+    NULLIF(COALESCE(it.name, ''), '') AS tenant_name,
+    NULLIF(ce.project_id, '') AS project_id,
+    NULLIF(COALESCE(ip.name, ''), '') AS project_name,
+    NULLIF(ce.user_id, '') AS user_id,
+    ce.resource_type AS service,
+    ce.meter_name AS meter,
+    NULLIF(COALESCE(
+        NULLIF(me.catalog_item, ''),
+        NULLIF(ici.catalog_item, ''),
+        NULLIF(ibm.catalog_item, ''),
+        ''
+    ), '') AS catalog_item,
+    NULLIF(COALESCE(
+        NULLIF(me.instance_type, ''),
+        NULLIF(ici.instance_type, ''),
+        ''
+    ), '') AS instance_type,
+    NULLIF(ce.resource_id, '') AS resource_id,
+    NULLIF(COALESCE(
+        NULLIF(ici.name, ''),
+        NULLIF(icl.name, ''),
+        NULLIF(ibm.name, ''),
+        NULLIF(im.name, ''),
+        NULLIF(im.model_name, ''),
+        ''
+    ), '') AS resource_name,
+    NULLIF(COALESCE(
+        NULLIF(me.cluster_id, ''),
+        NULLIF(ici.cluster_id, ''),
+        NULLIF(icl.cluster_id, ''),
+        CASE WHEN ce.resource_type IN ('cluster_order', 'cluster') THEN ce.resource_id ELSE '' END,
+        ''
+    ), '') AS cluster_id,
+    NULLIF(COALESCE(me.deployment, ''), '') AS deployment,
+    COALESCE(NULLIF(r.cost_type, ''), 'Infrastructure') AS cost_type,
+    SUM(ce.metered_value) AS usage_amount,
+    COALESCE(me.unit, '') AS unit,
+    SUM(ce.cost_amount) AS cost_amount,
+    ce.currency AS currency,
+    (
+        CASE WHEN jsonb_typeof(it.labels) = 'object' THEN it.labels ELSE '{}'::jsonb END
+        || CASE WHEN jsonb_typeof(ip.labels) = 'object' THEN ip.labels ELSE '{}'::jsonb END
+        || CASE WHEN jsonb_typeof(ici.labels) = 'object' THEN ici.labels ELSE '{}'::jsonb END
+        || CASE WHEN jsonb_typeof(icl.labels) = 'object' THEN icl.labels ELSE '{}'::jsonb END
+        || CASE WHEN jsonb_typeof(ibm.labels) = 'object' THEN ibm.labels ELSE '{}'::jsonb END
+        || CASE WHEN jsonb_typeof(im.labels) = 'object' THEN im.labels ELSE '{}'::jsonb END
+        || CASE WHEN jsonb_typeof(me.billing_dimensions) = 'object' THEN me.billing_dimensions ELSE '{}'::jsonb END
+    ) AS tags,
+    COUNT(ce.id) AS entry_count
+FROM cost_entries ce
+LEFT JOIN metering_entries me ON me.id = ce.metering_entry_id
+LEFT JOIN rates r ON r.id = ce.rate_id
+LEFT JOIN inventory_tenant it ON it.tenant_id = ce.tenant_id
+LEFT JOIN inventory_project ip ON ip.project_id = ce.project_id
+LEFT JOIN inventory_compute_instance ici
+    ON ce.resource_type = 'compute_instance' AND ici.instance_id = ce.resource_id
+LEFT JOIN inventory_cluster icl
+    ON ce.resource_type IN ('cluster', 'cluster_order') AND icl.cluster_id = ce.resource_id
+LEFT JOIN inventory_bare_metal_instance ibm
+    ON ce.resource_type IN ('bare_metal', 'bare_metal_instance') AND ibm.instance_id = ce.resource_id
+LEFT JOIN inventory_model im
+    ON ce.resource_type IN ('model', 'maas_inference') AND im.model_id = ce.resource_id
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 19, 20;
 `
 
 // ErrReceiptCollision means a producer reused an event identity for different
@@ -545,14 +623,23 @@ func (s *Store) InsertRawEvent(ctx context.Context, ev RawEvent) (bool, error) {
 	return true, nil
 }
 
+func normalizeBillingDimensionsJSON(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return raw
+}
+
 // InsertMeteringEntry stores a single metering record.
 func (s *Store) InsertMeteringEntry(ctx context.Context, entry MeteringEntry) error {
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO metering_entries
-			(raw_event_id, resource_type, resource_id, tenant_id, project_id, user_id, instance_type, catalog_item, meter_name, value, unit, period_start, period_end)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			(raw_event_id, resource_type, resource_id, tenant_id, project_id, user_id, instance_type, catalog_item, deployment, cluster_id, billing_dimensions, meter_name, value, unit, period_start, period_end)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 	`, entry.RawEventID, entry.ResourceType, entry.ResourceID, entry.TenantID,
-		entry.ProjectID, entry.UserID, entry.InstanceType, entry.CatalogItem, entry.MeterName, entry.Value, entry.Unit, entry.PeriodStart, entry.PeriodEnd)
+		entry.ProjectID, entry.UserID, entry.InstanceType, entry.CatalogItem,
+		entry.Deployment, entry.ClusterID, normalizeBillingDimensionsJSON(entry.BillingDimensions),
+		entry.MeterName, entry.Value, entry.Unit, entry.PeriodStart, entry.PeriodEnd)
 
 	if err != nil {
 		return fmt.Errorf("insert metering entry %s/%s: %w", entry.ResourceID, entry.MeterName, err)
@@ -568,17 +655,20 @@ func (s *Store) InsertMeteringEntryBatch(ctx context.Context, entries []Metering
 		return s.InsertMeteringEntry(ctx, entries[0])
 	}
 
-	query := "INSERT INTO metering_entries (raw_event_id, resource_type, resource_id, tenant_id, project_id, user_id, instance_type, catalog_item, meter_name, value, unit, period_start, period_end) VALUES "
-	args := make([]interface{}, 0, len(entries)*13)
+	query := "INSERT INTO metering_entries (raw_event_id, resource_type, resource_id, tenant_id, project_id, user_id, instance_type, catalog_item, deployment, cluster_id, billing_dimensions, meter_name, value, unit, period_start, period_end) VALUES "
+	args := make([]interface{}, 0, len(entries)*16)
 	for i, e := range entries {
 		if i > 0 {
 			query += ", "
 		}
-		base := i * 13
-		query += fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
-			base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9, base+10, base+11, base+12, base+13)
+		base := i * 16
+		query += fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8,
+			base+9, base+10, base+11, base+12, base+13, base+14, base+15, base+16)
 		args = append(args, e.RawEventID, e.ResourceType, e.ResourceID,
-			e.TenantID, e.ProjectID, e.UserID, e.InstanceType, e.CatalogItem, e.MeterName, e.Value, e.Unit, e.PeriodStart, e.PeriodEnd)
+			e.TenantID, e.ProjectID, e.UserID, e.InstanceType, e.CatalogItem,
+			e.Deployment, e.ClusterID, normalizeBillingDimensionsJSON(e.BillingDimensions),
+			e.MeterName, e.Value, e.Unit, e.PeriodStart, e.PeriodEnd)
 	}
 	_, err := s.db.Exec(ctx, query, args...)
 	if err != nil {

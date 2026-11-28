@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -473,5 +476,143 @@ func TestProcessEvents_TenantIsolation(t *testing.T) {
 	errPlatform := h.processEvents(ctxPlatformAdmin, []cloudEventInternal{eventTenant1})
 	if errPlatform != nil {
 		t.Fatalf("expected nil error for platform admin, got %v", errPlatform)
+	}
+}
+
+func TestO3_PlatformAdminAndTenantAuthz_Unit(t *testing.T) {
+	h := &APIHandler{logger: slog.Default()}
+	orgAdminCtx := authn.WithIdentity(context.Background(), &authn.Identity{
+		OrgID:      "tenant-1",
+		Username:   "org-admin",
+		IsOrgAdmin: true,
+	})
+
+	t.Run("CreateRate rejects non-platform-admin with 403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rates", bytes.NewBufferString(`{"resource_type":"compute_instance","meter_name":"compute","price_per_unit":"0.01"}`)).WithContext(orgAdminCtx)
+		w := httptest.NewRecorder()
+		h.CreateRate(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", w.Code)
+		}
+	})
+
+	t.Run("DeleteRate rejects non-platform-admin with 403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/rates/1", nil).WithContext(orgAdminCtx)
+		w := httptest.NewRecorder()
+		h.DeleteRate(w, req, 1)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", w.Code)
+		}
+	})
+
+	t.Run("CreateOrUpdateRule rejects non-platform-admin with 403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rules", bytes.NewBufferString(`{"name":"r1","rule_json":{}}`)).WithContext(orgAdminCtx)
+		w := httptest.NewRecorder()
+		h.CreateOrUpdateRule(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", w.Code)
+		}
+	})
+
+	t.Run("DeleteRule rejects non-platform-admin with 403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/rules/r1", nil).WithContext(orgAdminCtx)
+		w := httptest.NewRecorder()
+		h.DeleteRule(w, req, "r1")
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", w.Code)
+		}
+	})
+
+	t.Run("GetPipelineSummary rejects non-platform-admin with 403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/reports/summary", nil).WithContext(orgAdminCtx)
+		w := httptest.NewRecorder()
+		h.GetPipelineSummary(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", w.Code)
+		}
+	})
+
+	t.Run("GetDebugConfig rejects non-platform-admin with 403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/debug/config", nil).WithContext(orgAdminCtx)
+		w := httptest.NewRecorder()
+		h.GetDebugConfig(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", w.Code)
+		}
+	})
+
+	t.Run("TriggerReconcile rejects non-platform-admin with 403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/reconcile", nil).WithContext(orgAdminCtx)
+		w := httptest.NewRecorder()
+		h.TriggerReconcile(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", w.Code)
+		}
+	})
+
+	t.Run("CreateWallet rejects cross-tenant with 403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/wallets", bytes.NewBufferString(`{"tenant_id":"tenant-2"}`)).WithContext(orgAdminCtx)
+		w := httptest.NewRecorder()
+		h.CreateWallet(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", w.Code)
+		}
+	})
+
+	t.Run("ListRates rejects cross-tenant query with 403", func(t *testing.T) {
+		other := "tenant-2"
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/rates?tenant_id=tenant-2", nil).WithContext(orgAdminCtx)
+		w := httptest.NewRecorder()
+		h.ListRates(w, req, ListRatesParams{TenantId: &other})
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", w.Code)
+		}
+	})
+
+	t.Run("Export endpoints reject cross-tenant query with 403", func(t *testing.T) {
+		other := "tenant-2"
+		reqDD := httptest.NewRequest(http.MethodGet, "/api/v1/export/dirty-dates?tenant_id=tenant-2", nil).WithContext(orgAdminCtx)
+		wDD := httptest.NewRecorder()
+		h.GetExportDirtyDates(wDD, reqDD, GetExportDirtyDatesParams{TenantId: &other})
+		if wDD.Code != http.StatusForbidden {
+			t.Fatalf("dirty-dates expected 403, got %d", wDD.Code)
+		}
+
+		reqDaily := httptest.NewRequest(http.MethodGet, "/api/v1/export/daily?dates=2026-11-27&tenant_id=tenant-2", nil).WithContext(orgAdminCtx)
+		wDaily := httptest.NewRecorder()
+		h.GetExportDaily(wDaily, reqDaily, GetExportDailyParams{Dates: "2026-11-27", TenantId: &other})
+		if wDaily.Code != http.StatusForbidden {
+			t.Fatalf("export daily expected 403, got %d", wDaily.Code)
+		}
+	})
+}
+
+func TestParseExportDatesAndFormat(t *testing.T) {
+	dates, err := parseExportDates(" 2026-11-26 , 2026-11-27,2026-11-26 ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(dates) != 2 || dates[0] != "2026-11-26" || dates[1] != "2026-11-27" {
+		t.Fatalf("unexpected parsed dates: %v", dates)
+	}
+
+	if _, err := parseExportDates(""); err == nil {
+		t.Error("expected error for empty dates")
+	}
+	if _, err := parseExportDates("2026-13-45"); err == nil {
+		t.Error("expected error for invalid calendar date")
+	}
+
+	if got := resolveExportFormat(nil, "text/csv"); got != "csv" {
+		t.Errorf("Accept text/csv resolved to %q, want csv", got)
+	}
+	if got := resolveExportFormat(nil, ""); got != "ndjson" {
+		t.Errorf("default format resolved to %q, want ndjson", got)
+	}
+	if !acceptsGzip("deflate, gzip;q=1.0, br") {
+		t.Error("expected acceptsGzip true")
+	}
+	if acceptsGzip("br, identity") {
+		t.Error("expected acceptsGzip false")
 	}
 }

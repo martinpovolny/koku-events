@@ -31,12 +31,14 @@ The API is defined by the [OpenAPI 3.0.3 specification](openapi.yaml).
 | 19 | GET | `/api/v1/reports/costs` | Aggregated cost report (Koku-compatible, JSON or CSV) |
 | 20 | GET | `/api/v1/reports/breakdown` | Per-resource cost line items (JSON or CSV) |
 | 21 | GET | `/api/v1/reports/summary` | Pipeline health summary |
-| 22 | GET | `/api/v1/customers/{id}/entitlements/{key}/value` | IPP-compatible balance check |
-| 23 | POST | `/api/v1/reconcile` | Trigger manual OSAC reconciliation |
-| 24 | GET | `/` | Service portal & tools overview |
-| 25 | GET | `/ui/rates` | Interactive Catalog & Rate Assignment UI |
-| 26 | GET | `/ui/reports` | Interactive Cost Reports UI |
-| 27 | GET | `/ui/dashboard` | Built-in diagnostic dashboard (HTML, redirected from `/debug/dashboard`) |
+| 22 | GET | `/api/v1/export/dirty-dates` | Discover modified UTC dates & snapshot watermark for Koku pull export |
+| 23 | GET | `/api/v1/export/daily` | Stream daily cost rollup rows (`ndjson`, `csv`, `json`, optional gzip) |
+| 24 | GET | `/api/v1/customers/{id}/entitlements/{key}/value` | IPP-compatible balance check |
+| 25 | POST | `/api/v1/reconcile` | Trigger manual OSAC reconciliation |
+| 26 | GET | `/` | Service portal & tools overview |
+| 27 | GET | `/ui/rates` | Interactive Catalog & Rate Assignment UI |
+| 28 | GET | `/ui/reports` | Interactive Cost Reports UI |
+| 29 | GET | `/ui/dashboard` | Built-in diagnostic dashboard (HTML, redirected from `/debug/dashboard`) |
 
 ### Metrics Server (separate port, no auth)
 

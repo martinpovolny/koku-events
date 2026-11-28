@@ -1167,6 +1167,19 @@ func (h *APIHandler) GetCatalog(w http.ResponseWriter, r *http.Request) {
 		writeErrorJSON(w, "failed to list catalog items", http.StatusInternalServerError)
 		return
 	}
+	if ident, ok := authn.IdentityFromContext(r.Context()); ok && !ident.IsPlatformAdmin {
+		if ident.OrgID == "" {
+			writeErrorJSON(w, "forbidden: identity has no organization", http.StatusForbidden)
+			return
+		}
+		filtered := make([]inventory.CatalogItemRecord, 0, len(catalogItems))
+		for _, item := range catalogItems {
+			if item.Tenant == "" || item.Tenant == ident.OrgID {
+				filtered = append(filtered, item)
+			}
+		}
+		catalogItems = filtered
+	}
 	if catalogItems == nil {
 		catalogItems = []inventory.CatalogItemRecord{}
 	}
@@ -1198,6 +1211,10 @@ func (h *APIHandler) ListRates(w http.ResponseWriter, r *http.Request, params Li
 	var tenantID string
 	if params.TenantId != nil {
 		tenantID = *params.TenantId
+	}
+	if err := enforceTenant(r.Context(), &tenantID); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
 	}
 
 	rates, err := h.store.ListRates(r.Context(), tenantID)
@@ -1250,6 +1267,10 @@ func (h *APIHandler) ListRates(w http.ResponseWriter, r *http.Request, params Li
 
 // CreateRate implements ServerInterface.
 func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
+	if err := requirePlatformAdmin(r.Context()); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 
 	var req CreateRateRequest
@@ -1389,6 +1410,10 @@ func (h *APIHandler) CreateRate(w http.ResponseWriter, r *http.Request) {
 
 // DeleteRate implements ServerInterface.
 func (h *APIHandler) DeleteRate(w http.ResponseWriter, r *http.Request, id int64) {
+	if err := requirePlatformAdmin(r.Context()); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	found, err := h.store.DeleteRate(r.Context(), id)
 	if err != nil {
 		h.logger.Error("delete rate failed", "id", id, "error", err)
@@ -1765,6 +1790,10 @@ func (h *APIHandler) CreateWallet(w http.ResponseWriter, r *http.Request) {
 		writeErrorJSON(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := enforceTenant(r.Context(), &req.TenantID); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if req.TenantID == "" {
 		writeErrorJSON(w, "tenant_id is required", http.StatusBadRequest)
 		return
@@ -1813,6 +1842,11 @@ func (h *APIHandler) GetWalletStatus(w http.ResponseWriter, r *http.Request, id 
 		writeErrorJSON(w, "wallet not found", http.StatusNotFound)
 		return
 	}
+	walletTenant := wallet.TenantID
+	if err := enforceTenant(ctx, &walletTenant); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 
 	remainingPct := 0.0
 	if !wallet.ReferenceBalance.IsZero() {
@@ -1852,6 +1886,11 @@ func (h *APIHandler) TopUpWallet(w http.ResponseWriter, r *http.Request, id stri
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 
+	if status, err := h.enforceWalletTenant(r.Context(), id); err != nil {
+		writeErrorJSON(w, err.Error(), status)
+		return
+	}
+
 	var req struct {
 		Amount      decimal.Decimal `json:"amount"`
 		Currency    string          `json:"currency"`
@@ -1881,6 +1920,11 @@ func (h *APIHandler) TopUpWallet(w http.ResponseWriter, r *http.Request, id stri
 func (h *APIHandler) AdjustWallet(w http.ResponseWriter, r *http.Request, id string) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+
+	if status, err := h.enforceWalletTenant(r.Context(), id); err != nil {
+		writeErrorJSON(w, err.Error(), status)
+		return
+	}
 
 	var req struct {
 		Amount      decimal.Decimal `json:"amount"`
@@ -1914,6 +1958,11 @@ func (h *APIHandler) AdjustWallet(w http.ResponseWriter, r *http.Request, id str
 // GetWalletLedger implements ServerInterface.
 func (h *APIHandler) GetWalletLedger(w http.ResponseWriter, r *http.Request, id string, params GetWalletLedgerParams) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if status, err := h.enforceWalletTenant(r.Context(), id); err != nil {
+		writeErrorJSON(w, err.Error(), status)
+		return
+	}
 
 	limit := 100
 	if params.Limit != nil && *params.Limit > 0 {
@@ -2263,6 +2312,10 @@ func (h *APIHandler) GetCostBreakdown(w http.ResponseWriter, r *http.Request, pa
 // GetPipelineSummary implements ServerInterface.
 func (h *APIHandler) GetPipelineSummary(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := requirePlatformAdmin(r.Context()); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 
 	ctx := r.Context()
 	summary, err := h.store.PipelineSummary(ctx)
@@ -2345,6 +2398,10 @@ func (h *APIHandler) GetEntitlementValue(w http.ResponseWriter, r *http.Request,
 // GetDebugConfig implements ServerInterface.
 func (h *APIHandler) GetDebugConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := requirePlatformAdmin(r.Context()); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if h.cfg == nil {
 		writeJSON(w, map[string]string{"error": "config not available"})
 		return
@@ -2354,6 +2411,10 @@ func (h *APIHandler) GetDebugConfig(w http.ResponseWriter, r *http.Request) {
 
 // TriggerReconcile implements ServerInterface.
 func (h *APIHandler) TriggerReconcile(w http.ResponseWriter, r *http.Request) {
+	if err := requirePlatformAdmin(r.Context()); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if h.reconciler == nil {
 		writeErrorJSON(w, "reconciler not configured", http.StatusServiceUnavailable)
 		return
@@ -2362,9 +2423,10 @@ func (h *APIHandler) TriggerReconcile(w http.ResponseWriter, r *http.Request) {
 		writeErrorJSON(w, "reconciliation already in progress", http.StatusTooManyRequests)
 		return
 	}
+	bgCtx := context.WithoutCancel(r.Context())
 	go func() {
 		defer h.reconciling.Store(false)
-		h.reconciler.ReconcileAll(context.Background())
+		h.reconciler.ReconcileAll(bgCtx)
 	}()
 	w.WriteHeader(http.StatusAccepted)
 	writeJSON(w, map[string]string{"status": "reconciliation triggered"})
@@ -2463,6 +2525,10 @@ func (h *APIHandler) GetRule(w http.ResponseWriter, r *http.Request, name string
 
 // CreateOrUpdateRule upserts a GoRules decision model in the database.
 func (h *APIHandler) CreateOrUpdateRule(w http.ResponseWriter, r *http.Request) {
+	if err := requirePlatformAdmin(r.Context()); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	var req UpsertRuleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2502,6 +2568,10 @@ func (h *APIHandler) CreateOrUpdateRule(w http.ResponseWriter, r *http.Request) 
 
 // DeleteRule deletes a GoRules decision model by name.
 func (h *APIHandler) DeleteRule(w http.ResponseWriter, r *http.Request, name string) {
+	if err := requirePlatformAdmin(r.Context()); err != nil {
+		writeErrorJSON(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if name == "" {
 		name = r.PathValue("name")
 	}

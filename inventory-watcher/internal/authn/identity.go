@@ -19,7 +19,7 @@ type Identity struct {
 	Email           string `json:"email,omitempty"`
 	IsOrgAdmin      bool   `json:"is_org_admin"`
 	IsPlatformAdmin bool   `json:"is_platform_admin,omitempty"`
-	RawAuthType     string `json:"raw_auth_type,omitempty"` // "x-rh-identity" or "bearer-jwt"
+	RawAuthType     string `json:"raw_auth_type,omitempty"` // "x-rh-identity", "bearer-jwt", or "export-shared-secret"
 }
 
 const (
@@ -27,6 +27,14 @@ const (
 
 	// HeaderXRhIdentity is the Red Hat Insights identity header name.
 	HeaderXRhIdentity = "X-Rh-Identity"
+
+	// HeaderXBearerToken is an optional secondary header carrying the validated
+	// bearer JWT forwarded by a trusted gateway alongside X-Rh-Identity.
+	HeaderXBearerToken = "X-Bearer-Token"
+
+	// HeaderXExportToken is an optional header carrying the service-to-service
+	// shared secret for read-only /api/v1/export/* endpoints.
+	HeaderXExportToken = "X-Export-Token"
 )
 
 // WithIdentity stores the authenticated Identity into the context.

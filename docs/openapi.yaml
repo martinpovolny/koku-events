@@ -62,6 +62,8 @@ tags:
     description: Prepaid wallet management with ledger audit trail
   - name: Reports
     description: Cost reports and breakdowns with Koku-compatible response structure
+  - name: Export
+    description: Stateless read-only daily cost rollup export for Koku pull ingestion
   - name: IPP
     description: IPP entitlement / balance check compatibility for the external-metering plugin
   - name: Operations
@@ -1414,6 +1416,153 @@ paths:
                 live_vms: 45
                 live_clusters: 3
                 live_models: 8
+        "500":
+          description: Database query failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Export (Koku Pull Integration) ──────────────────────────────────────
+  /api/v1/export/dirty-dates:
+    get:
+      operationId: getExportDirtyDates
+      tags: [Export]
+      summary: Discover UTC usage dates modified since a watermark
+      description: >-
+        Returns a snapshot-consistent watermark (`REPEATABLE READ`) and the
+        sorted list of UTC usage dates (`YYYY-MM-DD`) that have `cost_entries`
+        created after `since` (or all dates when `since` is omitted), always
+        unioned with `{yesterday_utc, today_utc}` as a safety floor.
+
+
+        Designed for Koku Masu's watermark-driven incremental pull sync.
+        Accepts either standard JWT/`X-Rh-Identity` authentication or the
+        operator-provisioned `EXPORT_SHARED_SECRET` (`Authorization: Bearer`
+        or `X-Export-Token`), which is strictly scoped to read-only
+        `GET /api/v1/export/*` requests.
+      parameters:
+        - name: since
+          in: query
+          schema:
+            type: string
+            example: "2026-11-26T00:00:00Z"
+          description: >-
+            RFC 3339 watermark returned by the previous sync. Omit on initial
+            backfill to discover all dates with rated costs.
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+            example: tenant-acme
+          description: >-
+            Optional tenant filter. Platform admins and export service tokens
+            may omit to discover dirty dates across all tenants; non-admin
+            callers are scoped to their authenticated `org_id`.
+      responses:
+        "200":
+          description: Snapshot watermark and dirty UTC dates
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportDirtyDatesResponse"
+        "400":
+          description: Invalid `since` timestamp
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden tenant filter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Database query failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/export/daily:
+    get:
+      operationId: getExportDaily
+      tags: [Export]
+      summary: Stream daily cost rollup rows for requested UTC dates
+      description: >-
+        Returns complete UTC-day attributed cost rollups backed by the
+        `v1_daily_cost_rollup` SQL view for the requested `dates`. Negative
+        usage and cost corrections are preserved as signed sums. Supports
+        `Accept-Encoding: gzip` compression and `ndjson` (default), `jsonl`,
+        `csv`, or `json` output formats.
+
+
+        When `EXPORT_INCLUDE_USER_ID=false`, per-user rows are collapsed with
+        `user_id: null`.
+      parameters:
+        - name: dates
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "2026-11-26,2026-11-27"
+          description: >-
+            Comma-separated list of UTC dates (`YYYY-MM-DD`), up to 366 dates
+            per request.
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+            example: tenant-acme
+          description: >-
+            Optional tenant filter. Platform admins and export service tokens
+            may omit for cross-tenant export; non-admin callers are scoped to
+            their authenticated `org_id`.
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [ndjson, jsonl, csv, json]
+          description: >-
+            Response format. Defaults to `ndjson` (`application/x-ndjson`).
+            Also negotiates via `Accept` header when omitted.
+      responses:
+        "200":
+          description: Daily cost rollup rows
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dates:
+                    type: array
+                    items:
+                      type: string
+                  count:
+                    type: integer
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DailyCostRollupRow"
+            text/csv:
+              schema:
+                type: string
+        "400":
+          description: Missing or invalid `dates` or `format` parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden tenant filter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Database query failed
           content:
@@ -3224,6 +3373,14 @@ components:
           type: string
           description: JWT issuer URL for authentication (empty if disabled)
           example: ""
+        export_shared_secret_set:
+          type: boolean
+          description: Whether EXPORT_SHARED_SECRET is configured for /api/v1/export/*
+          example: true
+        export_include_user_id:
+          type: boolean
+          description: Whether daily cost export retains per-user rows (EXPORT_INCLUDE_USER_ID)
+          example: true
         debug_dashboard:
           type: boolean
           description: Whether the debug dashboard is enabled
@@ -3248,3 +3405,118 @@ components:
           type: string
           description: Splunk index name
           example: ""
+
+    # ── Export ────────────────────────────────────────────────────────────
+    ExportDirtyDatesResponse:
+      type: object
+      required: [watermark, dates]
+      properties:
+        watermark:
+          type: string
+          format: date-time
+          description: Snapshot high-water mark (RFC 3339) captured in REPEATABLE READ transaction
+          example: "2026-11-27T12:00:00Z"
+        dates:
+          type: array
+          items:
+            type: string
+            format: date
+          description: Sorted UTC dates (YYYY-MM-DD) modified since watermark, unioned with {yesterday, today}
+          example: ["2026-11-26", "2026-11-27"]
+
+    DailyCostRollupRow:
+      type: object
+      required:
+        - usage_date
+        - tenant_id
+        - service
+        - meter
+        - cost_type
+        - usage_amount
+        - unit
+        - cost_amount
+        - currency
+        - tags
+        - entry_count
+      properties:
+        usage_date:
+          type: string
+          format: date
+          example: "2026-11-27"
+        tenant_id:
+          type: string
+          example: "tenant-acme"
+        tenant_name:
+          type: string
+          nullable: true
+          example: "Acme Corp"
+        project_id:
+          type: string
+          nullable: true
+          example: "proj-ml"
+        project_name:
+          type: string
+          nullable: true
+          example: "ML Platform"
+        user_id:
+          type: string
+          nullable: true
+          example: "alice"
+        service:
+          type: string
+          example: "compute_instance"
+        meter:
+          type: string
+          example: "compute"
+        catalog_item:
+          type: string
+          nullable: true
+          example: "osac.templates.vm_medium"
+        instance_type:
+          type: string
+          nullable: true
+          example: "standard-4-8"
+        resource_id:
+          type: string
+          nullable: true
+          example: "vm-123"
+        resource_name:
+          type: string
+          nullable: true
+          example: "ml-worker-01"
+        cluster_id:
+          type: string
+          nullable: true
+          example: "cluster-prod-1"
+        deployment:
+          type: string
+          nullable: true
+          example: "eu-central-1"
+        cost_type:
+          type: string
+          example: "Infrastructure"
+        usage_amount:
+          type: string
+          description: Signed fixed-point decimal total metered usage for the UTC day
+          example: "3600.000000"
+        unit:
+          type: string
+          example: "seconds"
+        cost_amount:
+          type: string
+          description: Signed fixed-point decimal total rated cost for the UTC day
+          example: "1.2500000000"
+        currency:
+          type: string
+          example: "USD"
+        tags:
+          type: object
+          additionalProperties:
+            type: string
+          example:
+            env: "prod"
+            deployment: "eu-central-1"
+        entry_count:
+          type: integer
+          format: int64
+          example: 60

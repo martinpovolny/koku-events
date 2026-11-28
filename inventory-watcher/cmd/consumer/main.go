@@ -255,6 +255,7 @@ func main() {
 			logger.Error("failed to create auth middleware", "error", err)
 			os.Exit(1)
 		}
+		auth.SetExportSharedSecret(cfg.ExportSharedSecret)
 
 		mux := http.NewServeMux()
 		api.HandlerFromMux(h, mux)
@@ -267,7 +268,7 @@ func main() {
 			Addr:           cfg.IngestListenAddr,
 			Handler:        metrics.RequestLogger(logger, metrics.HTTPMiddleware(panicRecovery(logger, auth.Wrap(mux)))),
 			ReadTimeout:    10 * time.Second,
-			WriteTimeout:   10 * time.Second,
+			WriteTimeout:   60 * time.Second,
 			MaxHeaderBytes: 1 << 20,
 		}
 		g.Go(func() error {

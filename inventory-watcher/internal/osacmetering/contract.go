@@ -9,6 +9,7 @@
 package osacmetering
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -160,22 +161,64 @@ func (d UsageData) MeterName() string {
 	return "inference"
 }
 
+// UserID returns the end-user identifier dimension if present (D15).
+func (d UsageData) UserID() string {
+	if v := d.BillingDimensions["user_id"]; v != "" {
+		return v
+	}
+	return d.BillingDimensions["user"]
+}
+
+// Deployment returns the deployment/region placement dimension if present (G2).
+func (d UsageData) Deployment() string {
+	return d.BillingDimensions["deployment"]
+}
+
+// ClusterID returns the associated cluster identifier for cluster orders or
+// cluster-hosted compute resources (G4).
+func (d UsageData) ClusterID() string {
+	if v := d.BillingDimensions["cluster_id"]; v != "" {
+		return v
+	}
+	if d.ResourceType == ResourceTypeClusterOrder {
+		return d.ResourceID
+	}
+	return ""
+}
+
+// BillingDimensionsJSON serializes BillingDimensions as a JSON object suitable
+// for JSONB storage on metering_entries.
+func (d UsageData) BillingDimensionsJSON() json.RawMessage {
+	if len(d.BillingDimensions) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	b, err := json.Marshal(d.BillingDimensions)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return json.RawMessage(b)
+}
+
 // ToMeteringEntry maps a normalized OSAC v1 usage event into a Cost Management
 // metering_entries row. Negative quantities are preserved as signed values so
 // additive corrections adjust period totals and rating output.
 func (n *NormalizedUsage) ToMeteringEntry() inventory.MeteringEntry {
 	return inventory.MeteringEntry{
-		ResourceType: n.Envelope.Data.ResourceType,
-		ResourceID:   n.Envelope.Data.ResourceID,
-		TenantID:     n.Envelope.Data.EffectiveTenantID(),
-		ProjectID:    n.Envelope.Data.EffectiveProjectID(),
-		InstanceType: n.Envelope.Data.InstanceType(),
-		CatalogItem:  n.Envelope.Data.CatalogItem(),
-		MeterName:    n.Envelope.Data.MeterName(),
-		Value:        n.Quantity.InexactFloat64(),
-		Unit:         n.Envelope.Data.Usage.Unit,
-		PeriodStart:  n.PeriodStart,
-		PeriodEnd:    n.PeriodEnd,
+		ResourceType:      n.Envelope.Data.ResourceType,
+		ResourceID:        n.Envelope.Data.ResourceID,
+		TenantID:          n.Envelope.Data.EffectiveTenantID(),
+		ProjectID:         n.Envelope.Data.EffectiveProjectID(),
+		UserID:            n.Envelope.Data.UserID(),
+		InstanceType:      n.Envelope.Data.InstanceType(),
+		CatalogItem:       n.Envelope.Data.CatalogItem(),
+		Deployment:        n.Envelope.Data.Deployment(),
+		ClusterID:         n.Envelope.Data.ClusterID(),
+		BillingDimensions: n.Envelope.Data.BillingDimensionsJSON(),
+		MeterName:         n.Envelope.Data.MeterName(),
+		Value:             n.Quantity.InexactFloat64(),
+		Unit:              n.Envelope.Data.Usage.Unit,
+		PeriodStart:       n.PeriodStart,
+		PeriodEnd:         n.PeriodEnd,
 	}
 }
 

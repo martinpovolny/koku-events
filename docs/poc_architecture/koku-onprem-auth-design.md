@@ -112,7 +112,8 @@ type Identity struct {
 
 To prevent unauthenticated or spoofed `X-Rh-Identity` injection from arbitrary pods in the cluster, `X-Rh-Identity` processing is strictly gated behind `AUTH_TRUST_IDENTITY_HEADER=true` (default: `false`):
 - **When `AUTH_TRUST_IDENTITY_HEADER=false` (Default)**: Any `X-Rh-Identity` header is ignored. The service requires a valid `Authorization: Bearer <JWT>` header validated against Keycloak's JWKS.
-- **When `AUTH_TRUST_IDENTITY_HEADER=true`**: The service parses and trusts `X-Rh-Identity`.
+- **When `AUTH_TRUST_IDENTITY_HEADER=true`**: The service parses and trusts `X-Rh-Identity`. If the trusted gateway also forwards the validated Bearer JWT (`Authorization: Bearer <JWT>` or `X-Bearer-Token`), the middleware verifies the JWT against JWKS and enriches `IsPlatformAdmin` from signed `realm_access` (`cost-platform-admin` / `platform-admin`) or `is_platform_admin` claims (`O2` / `D13`). Unverified or forged tokens are ignored and never grant `IsPlatformAdmin`.
+- **Service-to-Service Export Secret (`EXPORT_SHARED_SECRET`, `D12`)**: When configured, requests carrying a constant-time-verified token (`Authorization: Bearer <secret>` or `X-Export-Token`) are accepted **strictly** on read-only `GET /api/v1/export/*` routes with `RawAuthType: "export-shared-secret"` and `IsPlatformAdmin: true`. The shared secret is rejected on all non-export and write endpoints.
 - **Security Requirement**: The edge reverse proxy or Envoy gateway MUST strip any incoming client-supplied `X-Rh-Identity` headers before injecting its own synthesized header.
 
 ```mermaid
@@ -165,6 +166,14 @@ Handlers in `internal/api/handler.go` enforce these boundaries:
      - Implicitly force `tenant_id = identity.OrgID` in the query filter.
    - For quota updates/deletions (`PUT /quotas/{id}`, `DELETE /quotas/{id}`):
      - Existing quota's `TenantID` must match `identity.OrgID`.
+   - For wallets (`POST /wallets`, `GET /wallets/{id}`, `POST /wallets/{id}/top-ups`, `POST /wallets/{id}/adjustments`, `GET /wallets/{id}/ledger`):
+     - Wallet `TenantID` must match `identity.OrgID` (cross-tenant access returns `HTTP 403 Forbidden`).
+   - For catalog and rates (`GET /catalog`, `GET /rates`):
+     - Non-platform-admin callers see global entries plus entries matching their own `identity.OrgID`; requesting another `tenant_id` returns `HTTP 403 Forbidden`.
+   - For global pricing & operational mutations/diagnostics (`POST /rates`, `DELETE /rates/{id}`, `POST /rules`, `DELETE /rules/{name}`, `GET /reports/summary`, `GET /debug/config`, `POST /reconcile`):
+     - Restricted to `IsPlatformAdmin` (`HTTP 403 Forbidden` for regular users and org admins).
+   - For pull export (`GET /api/v1/export/dirty-dates`, `GET /api/v1/export/daily`):
+     - Scoped via `enforceTenant` for normal callers; platform admins and `EXPORT_SHARED_SECRET` callers may export across all tenants.
    - For event ingestion (`POST /api/v1/events/batch`):
      - Each event's classified tenant must explicitly match `identity.OrgID`. Missing or mismatched event tenants return `eventValidationError` (HTTP 400).
 

@@ -2,6 +2,7 @@ package authn
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -34,10 +35,20 @@ type Middleware struct {
 	issuerURL           string
 	jwksURL             string
 	trustIdentityHeader bool
+	exportSharedSecret  string
 	keys                *sync.Map
 	caPool              *x509.CertPool
 	logger              *slog.Logger
 	client              *http.Client
+}
+
+// SetExportSharedSecret configures an optional service-to-service shared secret
+// accepted strictly for read-only GET /api/v1/export/* requests (D12).
+func (m *Middleware) SetExportSharedSecret(secret string) {
+	m.exportSharedSecret = strings.TrimSpace(secret)
+	if m.exportSharedSecret != "" && m.logger != nil {
+		m.logger.Info("export shared-secret authentication enabled for GET /api/v1/export/*")
+	}
 }
 
 // New creates a JWT authentication middleware. If issuerURL is empty,
@@ -93,6 +104,26 @@ func New(issuerURL, caCertPath string, trustIdentityHeader bool, logger *slog.Lo
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	if m.issuerURL == "" {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if m.exportSharedSecret != "" && isExportReadPath(r) {
+				if m.matchExportSharedSecret(r) {
+					ctx := WithIdentity(r.Context(), exportServiceIdentity())
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+				if m.trustIdentityHeader {
+					if xRhHeader := r.Header.Get(HeaderXRhIdentity); xRhHeader != "" {
+						id, err := ParseXRhIdentity(xRhHeader)
+						if err != nil {
+							writeAuthError(w, "invalid X-Rh-Identity: "+err.Error())
+							return
+						}
+						next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), id)))
+						return
+					}
+				}
+				writeAuthError(w, "missing or invalid export credentials")
+				return
+			}
 			if m.trustIdentityHeader {
 				if xRhHeader := r.Header.Get(HeaderXRhIdentity); xRhHeader != "" {
 					if id, err := ParseXRhIdentity(xRhHeader); err == nil {
@@ -110,6 +141,13 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
+		// Service-to-service shared secret strictly scoped to read-only GET /api/v1/export/* (D12).
+		if m.matchExportSharedSecret(r) {
+			ctx := WithIdentity(r.Context(), exportServiceIdentity())
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
 		// Only trust X-Rh-Identity if explicitly configured (e.g. behind trusted gateway).
 		// Note: The trusted gateway must strip any client-supplied X-Rh-Identity headers before injecting its own.
 		if m.trustIdentityHeader {
@@ -120,7 +158,22 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 					writeAuthError(w, "invalid X-Rh-Identity: "+err.Error())
 					return
 				}
-				ctx := WithIdentity(r.Context(), identity)
+				ctx := r.Context()
+				// O2 (D13): If the trusted gateway also forwards the validated Bearer JWT
+				// (via Authorization or X-Bearer-Token), verify it via JWKS and enrich
+				// IsPlatformAdmin from signed realm_access/is_platform_admin claims.
+				if bearer := extractForwardedBearer(r); bearer != "" {
+					if claims, jwtErr := m.validateToken(bearer); jwtErr == nil {
+						jwtIdentity := IdentityFromJWTClaims(claims)
+						if jwtIdentity.IsPlatformAdmin {
+							identity.IsPlatformAdmin = true
+						}
+						ctx = context.WithValue(ctx, claimsKey, claims)
+					} else {
+						m.logger.Warn("forwarded bearer token validation failed during X-Rh-Identity enrichment", "error", jwtErr)
+					}
+				}
+				ctx = WithIdentity(ctx, identity)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -158,6 +211,49 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	})
 }
 
+func isExportReadPath(r *http.Request) bool {
+	return r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/export/")
+}
+
+func exportServiceIdentity() *Identity {
+	return &Identity{
+		Username:        "koku-export-service",
+		IsPlatformAdmin: true,
+		RawAuthType:     "export-shared-secret",
+	}
+}
+
+func (m *Middleware) matchExportSharedSecret(r *http.Request) bool {
+	if m.exportSharedSecret == "" || !isExportReadPath(r) {
+		return false
+	}
+	candidate := strings.TrimSpace(r.Header.Get(HeaderXExportToken))
+	if candidate == "" {
+		if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+			candidate = strings.TrimSpace(bearer)
+		}
+	}
+	if candidate == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(candidate), []byte(m.exportSharedSecret)) == 1
+}
+
+func extractForwardedBearer(r *http.Request) string {
+	if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+		if trimmed := strings.TrimSpace(bearer); trimmed != "" {
+			return trimmed
+		}
+	}
+	if tok := strings.TrimSpace(r.Header.Get(HeaderXBearerToken)); tok != "" {
+		if bearer, ok := strings.CutPrefix(tok, "Bearer "); ok {
+			return strings.TrimSpace(bearer)
+		}
+		return tok
+	}
+	return ""
+}
+
 // isBypassPath returns true when the request path does not require authentication.
 func isBypassPath(path string) bool {
 	return path == "/" || path == "/ui" || strings.HasPrefix(path, "/ui/") ||
@@ -166,6 +262,9 @@ func isBypassPath(path string) bool {
 }
 
 func (m *Middleware) validateToken(bearer string) (jwt.MapClaims, error) {
+	if m.keys == nil {
+		return nil, errors.New("JWKS key store not initialized")
+	}
 	claims := jwt.MapClaims{}
 	token, err := jwt.ParseWithClaims(bearer, claims, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {

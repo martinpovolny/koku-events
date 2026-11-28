@@ -25,7 +25,9 @@ type Config struct {
 	CustomMetricsConfigPath string
 	AuthIssuerURL           string
 	AuthTrustIdentityHeader bool
-	DebugDashboard     bool
+	ExportSharedSecret      string
+	ExportIncludeUserID     bool
+	DebugDashboard          bool
 	DisabledComponents map[string]bool
 	ReconcileEntities  map[string]bool
 	SplunkHECURL       string
@@ -62,6 +64,8 @@ type DiagnosticInfo struct {
 	CustomMetricsConfigPath string   `json:"custom_metrics_config_path"`
 	AuthIssuerURL           string   `json:"auth_issuer_url"`
 	AuthTrustIdentityHeader bool     `json:"auth_trust_identity_header"`
+	ExportSharedSecretSet   bool     `json:"export_shared_secret_set"`
+	ExportIncludeUserID     bool     `json:"export_include_user_id"`
 	DebugDashboard          bool     `json:"debug_dashboard"`
 	OSACTokenSet            bool     `json:"osac_token_set"`
 	OSACCACertSet           bool     `json:"osac_ca_cert_set"`
@@ -97,6 +101,8 @@ func (c *Config) Diagnostics() DiagnosticInfo {
 		CustomMetricsConfigPath: c.CustomMetricsConfigPath,
 		AuthIssuerURL:           c.AuthIssuerURL,
 		AuthTrustIdentityHeader: c.AuthTrustIdentityHeader,
+		ExportSharedSecretSet:   c.ExportSharedSecret != "",
+		ExportIncludeUserID:     c.ExportIncludeUserID,
 		DebugDashboard:          c.DebugDashboard,
 		OSACTokenSet:            c.OSACToken != "",
 		OSACCACertSet:           c.OSACCACert != "",
@@ -165,6 +171,8 @@ func Load() *Config {
 		CustomMetricsConfigPath: os.Getenv("CUSTOM_METRICS_CONFIG"),
 		AuthIssuerURL:           os.Getenv("AUTH_ISSUER_URL"),
 		AuthTrustIdentityHeader: os.Getenv("AUTH_TRUST_IDENTITY_HEADER") == "true",
+		ExportSharedSecret:      os.Getenv("EXPORT_SHARED_SECRET"),
+		ExportIncludeUserID:     envOrDefault("EXPORT_INCLUDE_USER_ID", "true") != "false",
 		DebugDashboard:          envOrDefault("DEBUG_DASHBOARD", "true") != "false",
 		DisabledComponents:      parseDisabledComponents(os.Getenv("DISABLE_COMPONENTS")),
 		ReconcileEntities:       parseReconcileEntities(os.Getenv("RECONCILE_ENTITIES")),

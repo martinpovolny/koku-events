@@ -124,20 +124,23 @@ type RawEvent struct {
 }
 
 type MeteringEntry struct {
-	ID           int64     `json:"id"`
-	RawEventID   *int64    `json:"raw_event_id"`
-	ResourceType string    `json:"resource_type"`
-	ResourceID   string    `json:"resource_id"`
-	TenantID     string    `json:"tenant_id"`
-	ProjectID    string    `json:"project_id"`
-	UserID       string    `json:"user_id"`
-	InstanceType string    `json:"instance_type"`
-	CatalogItem  string    `json:"catalog_item"`
-	MeterName    string    `json:"meter_name"`
-	Value        float64   `json:"value"`
-	Unit         string    `json:"unit"`
-	PeriodStart  time.Time `json:"period_start"`
-	PeriodEnd    time.Time `json:"period_end"`
+	ID                int64           `json:"id"`
+	RawEventID        *int64          `json:"raw_event_id"`
+	ResourceType      string          `json:"resource_type"`
+	ResourceID        string          `json:"resource_id"`
+	TenantID          string          `json:"tenant_id"`
+	ProjectID         string          `json:"project_id"`
+	UserID            string          `json:"user_id"`
+	InstanceType      string          `json:"instance_type"`
+	CatalogItem       string          `json:"catalog_item"`
+	Deployment        string          `json:"deployment,omitempty"`
+	ClusterID         string          `json:"cluster_id,omitempty"`
+	BillingDimensions json.RawMessage `json:"billing_dimensions,omitempty"`
+	MeterName         string          `json:"meter_name"`
+	Value             float64         `json:"value"`
+	Unit              string          `json:"unit"`
+	PeriodStart       time.Time       `json:"period_start"`
+	PeriodEnd         time.Time       `json:"period_end"`
 }
 
 type Tier struct {
@@ -181,6 +184,39 @@ type CostEntry struct {
 	PeriodStart     time.Time       `json:"period_start"`
 	PeriodEnd       time.Time       `json:"period_end"`
 	WalletApplied   decimal.Decimal `json:"wallet_applied"`
+	CreatedAt       time.Time       `json:"created_at,omitempty"`
+}
+
+// ExportDirtyDatesResult is returned by QueryExportDirtyDates (G1 / D9).
+type ExportDirtyDatesResult struct {
+	Watermark time.Time `json:"watermark"`
+	Dates     []string  `json:"dates"`
+}
+
+// DailyCostRollupRow represents one UTC-day attributed cost rollup row from
+// v1_daily_cost_rollup (G5 / D10 / D15).
+type DailyCostRollupRow struct {
+	UsageDate    string            `json:"usage_date"`
+	TenantID     string            `json:"tenant_id"`
+	TenantName   *string           `json:"tenant_name"`
+	ProjectID    *string           `json:"project_id"`
+	ProjectName  *string           `json:"project_name"`
+	UserID       *string           `json:"user_id"`
+	Service      string            `json:"service"`
+	Meter        string            `json:"meter"`
+	CatalogItem  *string           `json:"catalog_item"`
+	InstanceType *string           `json:"instance_type"`
+	ResourceID   *string           `json:"resource_id"`
+	ResourceName *string           `json:"resource_name"`
+	ClusterID    *string           `json:"cluster_id"`
+	Deployment   *string           `json:"deployment"`
+	CostType     string            `json:"cost_type"`
+	UsageAmount  decimal.Decimal   `json:"usage_amount"`
+	Unit         string            `json:"unit"`
+	CostAmount   decimal.Decimal   `json:"cost_amount"`
+	Currency     string            `json:"currency"`
+	Tags         map[string]string `json:"tags"`
+	EntryCount   int64             `json:"entry_count"`
 }
 
 type QuotaRecord struct {

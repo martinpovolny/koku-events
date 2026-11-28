@@ -475,3 +475,240 @@ func TestAuthMiddleware_BearerTokenValidation(t *testing.T) {
 		}
 	})
 }
+
+// TestAuthMiddleware_XRhIdentityPlatformAdminEnrichment verifies O2 (D13):
+// when AUTH_TRUST_IDENTITY_HEADER=true and the gateway forwards a signed Bearer
+// JWT alongside X-Rh-Identity, IsPlatformAdmin is derived only after JWKS
+// verification of that JWT.
+func TestAuthMiddleware_XRhIdentityPlatformAdminEnrichment(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const issuer = "https://auth.example.com"
+	keysMap := &sync.Map{}
+	keysMap.Store("test-kid", &rsaKey.PublicKey)
+
+	m := &Middleware{
+		issuerURL:           issuer,
+		trustIdentityHeader: true,
+		keys:                keysMap,
+		logger:              slog.Default(),
+	}
+
+	signWith := func(key *rsa.PrivateKey, claims jwt.MapClaims) string {
+		token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+		token.Header["kid"] = "test-kid"
+		signed, signErr := token.SignedString(key)
+		if signErr != nil {
+			t.Fatalf("signing token: %v", signErr)
+		}
+		return signed
+	}
+
+	xRhHeader, err := BuildXRhIdentity(Identity{
+		OrgID:      "koku-single-org",
+		Username:   "ops-admin",
+		IsOrgAdmin: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("valid Authorization Bearer JWT with cost-platform-admin enriches IsPlatformAdmin", func(t *testing.T) {
+		var capturedID *Identity
+		handler := m.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedID, _ = IdentityFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		tok := signWith(rsaKey, jwt.MapClaims{
+			"iss":    issuer,
+			"exp":    time.Now().Add(time.Hour).Unix(),
+			"org_id": "koku-single-org",
+			"realm_access": map[string]interface{}{
+				"roles": []interface{}{"cost-platform-admin"},
+			},
+		})
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/reports/costs", nil)
+		req.Header.Set(HeaderXRhIdentity, xRhHeader)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		if capturedID == nil || !capturedID.IsPlatformAdmin || capturedID.OrgID != "koku-single-org" {
+			t.Fatalf("expected enriched platform admin identity, got %+v", capturedID)
+		}
+	})
+
+	t.Run("valid X-Bearer-Token JWT with platform-admin enriches IsPlatformAdmin", func(t *testing.T) {
+		var capturedID *Identity
+		handler := m.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedID, _ = IdentityFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		tok := signWith(rsaKey, jwt.MapClaims{
+			"iss":               issuer,
+			"exp":               time.Now().Add(time.Hour).Unix(),
+			"is_platform_admin": true,
+		})
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/reports/costs", nil)
+		req.Header.Set(HeaderXRhIdentity, xRhHeader)
+		req.Header.Set(HeaderXBearerToken, tok)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		if capturedID == nil || !capturedID.IsPlatformAdmin {
+			t.Fatalf("expected IsPlatformAdmin=true from X-Bearer-Token, got %+v", capturedID)
+		}
+	})
+
+	t.Run("forged JWT with wrong signing key does NOT grant IsPlatformAdmin", func(t *testing.T) {
+		var capturedID *Identity
+		handler := m.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedID, _ = IdentityFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		forged := signWith(otherKey, jwt.MapClaims{
+			"iss":               issuer,
+			"exp":               time.Now().Add(time.Hour).Unix(),
+			"is_platform_admin": true,
+		})
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/reports/costs", nil)
+		req.Header.Set(HeaderXRhIdentity, xRhHeader)
+		req.Header.Set("Authorization", "Bearer "+forged)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 (gateway X-Rh-Identity remains valid), got %d", w.Code)
+		}
+		if capturedID == nil {
+			t.Fatal("expected identity from X-Rh-Identity")
+		}
+		if capturedID.IsPlatformAdmin {
+			t.Fatalf("forged JWT must NEVER grant IsPlatformAdmin")
+		}
+	})
+}
+
+// TestAuthMiddleware_ExportSharedSecret verifies D12: EXPORT_SHARED_SECRET is
+// accepted strictly for read-only GET /api/v1/export/* endpoints and rejected
+// everywhere else.
+func TestAuthMiddleware_ExportSharedSecret(t *testing.T) {
+	m := &Middleware{
+		issuerURL:          "https://auth.example.com",
+		exportSharedSecret: "s3cr3t-export-token",
+		logger:             slog.Default(),
+	}
+
+	next := func(captured **Identity) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if id, ok := IdentityFromContext(r.Context()); ok {
+				*captured = id
+			}
+			w.WriteHeader(http.StatusOK)
+		})
+	}
+
+	t.Run("GET /api/v1/export/dirty-dates with Bearer shared secret succeeds", func(t *testing.T) {
+		var id *Identity
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/export/dirty-dates", nil)
+		req.Header.Set("Authorization", "Bearer s3cr3t-export-token")
+		w := httptest.NewRecorder()
+		m.Wrap(next(&id)).ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		if id == nil || !id.IsPlatformAdmin || id.RawAuthType != "export-shared-secret" {
+			t.Fatalf("unexpected export service identity: %+v", id)
+		}
+	})
+
+	t.Run("GET /api/v1/export/daily with X-Export-Token succeeds", func(t *testing.T) {
+		var id *Identity
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/export/daily?dates=2026-11-27", nil)
+		req.Header.Set(HeaderXExportToken, "s3cr3t-export-token")
+		w := httptest.NewRecorder()
+		m.Wrap(next(&id)).ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		if id == nil || !id.IsPlatformAdmin {
+			t.Fatalf("expected platform admin export identity, got %+v", id)
+		}
+	})
+
+	t.Run("shared secret rejected on non-export and write paths", func(t *testing.T) {
+		cases := []struct {
+			method string
+			path   string
+		}{
+			{http.MethodPost, "/api/v1/export/daily"},
+			{http.MethodPost, "/api/v1/events/batch"},
+			{http.MethodGet, "/api/v1/rates"},
+			{http.MethodPost, "/api/v1/rates"},
+			{http.MethodPost, "/api/v1/wallets"},
+			{http.MethodGet, "/api/v1/reports/costs"},
+		}
+		for _, tc := range cases {
+			var id *Identity
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Authorization", "Bearer s3cr3t-export-token")
+			w := httptest.NewRecorder()
+			m.Wrap(next(&id)).ServeHTTP(w, req)
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("%s %s: expected 401 when using export shared secret, got %d", tc.method, tc.path, w.Code)
+			}
+		}
+	})
+
+	t.Run("wrong shared secret on export path returns 401", func(t *testing.T) {
+		var id *Identity
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/export/dirty-dates", nil)
+		req.Header.Set("Authorization", "Bearer wrong-token")
+		w := httptest.NewRecorder()
+		m.Wrap(next(&id)).ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for wrong export token, got %d", w.Code)
+		}
+	})
+
+	t.Run("issuerURL empty with exportSharedSecret still protects export routes", func(t *testing.T) {
+		devM := &Middleware{
+			issuerURL:          "",
+			exportSharedSecret: "s3cr3t-export-token",
+			logger:             slog.Default(),
+		}
+		var id *Identity
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/export/dirty-dates", nil)
+		w := httptest.NewRecorder()
+		devM.Wrap(next(&id)).ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 without export secret when EXPORT_SHARED_SECRET is set, got %d", w.Code)
+		}
+
+		reqOK := httptest.NewRequest(http.MethodGet, "/api/v1/export/dirty-dates", nil)
+		reqOK.Header.Set("Authorization", "Bearer s3cr3t-export-token")
+		wOK := httptest.NewRecorder()
+		devM.Wrap(next(&id)).ServeHTTP(wOK, reqOK)
+		if wOK.Code != http.StatusOK {
+			t.Fatalf("expected 200 with valid export secret, got %d", wOK.Code)
+		}
+	})
+}
